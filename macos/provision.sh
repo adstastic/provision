@@ -274,6 +274,14 @@ log_info "Power settings configured to prevent sleep."
 log_info "Verifying Docker stack..."
 # Wait a moment for Colima to start if it was just loaded
 sleep 2
+
+# Check if DOCKER_HOST is configured
+if [ -z "$DOCKER_HOST" ]; then
+    log_action "DOCKER_HOST is not set. Please configure your shell as shown at the end of this script."
+else
+    log_info "DOCKER_HOST is set to: $DOCKER_HOST"
+fi
+
 test_command "Colima runtime" "colima status"
 test_command "Docker daemon" "docker ps"
 test_command "Docker Compose" "docker compose ls"
@@ -288,4 +296,20 @@ if ! tailscale status | grep -q "active"; then
 else
     log_info "Tailscale is already active."
 fi
+
+# --- Shell Configuration ---
+echo "\n--- Shell Configuration Required ---"
+echo "Add the following lines to your ~/.zshrc file:"
+echo ""
+echo "# Colima Docker configuration"
+echo "export DOCKER_HOST=\"unix://\$HOME/.colima/default/docker.sock\""
+echo ""
+echo "# Homebrew PATH (if not already present)"
+echo "eval \"\$(/opt/homebrew/bin/brew shellenv)\""
+echo ""
+echo "After adding these lines, run:"
+echo "  source ~/.zshrc"
+echo ""
+echo "Then re-run this script to verify everything is configured correctly:"
+echo "  $0"
 
