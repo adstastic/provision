@@ -6,14 +6,16 @@
 # the system before making any changes.
 #
 # This script will:
-# 1. Install Homebrew and essential tools (Go).
-# 2. Compile and install Tailscale from source.
-# 3. Configure Tailscale to run as a system daemon on boot.
-# 4. Disable FileVault to allow boot without physical login.
-# 5. Disable the standard macOS SSH server for better security.
-# 6. Enable the macOS Firewall with Stealth Mode and configure exceptions.
-# 7. Enable Screen Sharing (VNC) and other continuity services.
-# 8. Disable all sleep settings to ensure the machine is always online.
+# - Install Homebrew and essential tools (Go, tmux, Colima).
+# - Compile and install Tailscale from source.
+# - Configure Tailscale to run as a system daemon on boot.
+# - Configure tmux to run as a background service.
+# - Configure Colima (Docker runtime) to run as a background service.
+# - Disable FileVault to allow boot without physical login.
+# - Disable the standard macOS SSH server for better security.
+# - Enable the macOS Firewall with Stealth Mode and configure exceptions.
+# - Enable Screen Sharing (VNC) and other continuity services.
+# - Disable all sleep settings to ensure the machine is always online.
 
 set -e # Exit immediately if a command exits with a non-zero status.
 
@@ -32,11 +34,31 @@ log_action() {
     echo "  -> $1"
 }
 
+# Function to test if a command works correctly
+test_command() {
+    local name="$1"
+    local test_cmd="$2"
+    
+    log_info "Testing $name..."
+    if eval "$test_cmd" &>/dev/null; then
+        log_info "$name is working correctly."
+        return 0
+    else
+        log_action "$name test failed: $test_cmd"
+        return 1
+    fi
+}
+
 # --- Main Logic ---
 echo "--- Starting Headless Mac Setup ---"
 
-# --- Step 1: Install Dependencies ---
-log_info "Checking dependencies..."
+# --- Install Dependencies ---
+log_info "Installing dependencies..."
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Install Homebrew if not present
 if ! command_exists brew; then
     log_action "Homebrew not found. Installing Homebrew..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -45,14 +67,18 @@ else
     log_info "Homebrew is already installed."
 fi
 
-if ! command_exists go; then
-    log_action "Go not found. Installing Go via Homebrew..."
-    brew install go
-else
-    log_info "Go is already installed."
-fi
+# Install all dependencies from Brewfile
+log_action "Installing packages from Brewfile..."
+brew bundle --file="$SCRIPT_DIR/Brewfile"
 
-# --- Step 2: Install and Configure Tailscale Daemon ---
+# Test installed dependencies
+log_info "Testing installed dependencies..."
+test_command "Go" "go version"
+test_command "tmux" "tmux -V"
+test_command "Colima" "colima version"
+test_command "Docker CLI" "docker --version"
+
+# --- Install and Configure Tailscale Daemon ---
 log_info "Checking Tailscale installation..."
 if ! command_exists tailscaled; then
     log_action "tailscaled not found. Installing Tailscale from source..."
@@ -81,7 +107,91 @@ else
     log_info "Tailscale system daemon is already installed."
 fi
 
-# --- Step 3: Configure System Security and Access ---
+# --- Configure tmux Service ---
+log_info "Setting up tmux service for user..."
+
+# Determine the actual user running the script (even if using sudo)
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME=$(eval echo ~$SUDO_USER)
+else
+    REAL_USER="$USER"
+    REAL_HOME="$HOME"
+fi
+
+log_info "Setting up tmux for user: $REAL_USER"
+
+# Create LaunchAgents directory if it doesn't exist
+LAUNCH_AGENTS_DIR="$REAL_HOME/Library/LaunchAgents"
+if [ ! -d "$LAUNCH_AGENTS_DIR" ]; then
+    log_action "Creating LaunchAgents directory..."
+    sudo -u "$REAL_USER" mkdir -p "$LAUNCH_AGENTS_DIR"
+fi
+
+# Get the tmux binary path
+TMUX_PATH=$(command -v tmux)
+if [ -z "$TMUX_PATH" ]; then
+    echo "[ERROR] Could not find tmux in PATH after installation. Exiting."
+    exit 1
+fi
+log_info "Using tmux found at: $TMUX_PATH"
+
+# Create tmux service plist from template
+TMUX_PLIST="$LAUNCH_AGENTS_DIR/com.tmux.main.plist"
+if [ ! -f "$TMUX_PLIST" ]; then
+    log_action "Creating tmux service plist..."
+    # Copy the template and replace the placeholder with actual tmux path
+    sed "s|TMUX_PATH_PLACEHOLDER|$TMUX_PATH|g" "$SCRIPT_DIR/configs/com.tmux.main.plist" | sudo -u "$REAL_USER" tee "$TMUX_PLIST" > /dev/null
+else
+    log_info "tmux service plist already exists."
+fi
+
+# Load the service as the real user only if not running as root
+if [ "$REAL_USER" != "root" ]; then
+    if ! sudo -u "$REAL_USER" launchctl list | grep -q "com.tmux.main"; then
+        log_action "Loading tmux service..."
+        sudo -u "$REAL_USER" launchctl load "$TMUX_PLIST"
+    else
+        log_info "tmux service is already loaded."
+    fi
+else
+    log_info "Skipping tmux service for root user."
+fi
+
+# --- Configure Colima Service ---
+log_info "Setting up Colima service..."
+
+# Get the colima binary path
+COLIMA_PATH=$(command -v colima)
+if [ -z "$COLIMA_PATH" ]; then
+    echo "[ERROR] Could not find colima in PATH after installation. Exiting."
+    exit 1
+fi
+log_info "Using colima found at: $COLIMA_PATH"
+
+# Create Colima service plist
+COLIMA_PLIST="$LAUNCH_AGENTS_DIR/com.colima.plist"
+if [ ! -f "$COLIMA_PLIST" ]; then
+    log_action "Creating Colima service plist..."
+    # Copy the template and replace the placeholder with actual colima path
+    sed "s|COLIMA_PATH|$COLIMA_PATH|g" "$SCRIPT_DIR/configs/com.colima.plist" | sudo -u "$REAL_USER" tee "$COLIMA_PLIST" > /dev/null
+else
+    log_info "Colima service plist already exists."
+fi
+
+# Load the service as the real user only if not running as root
+if [ "$REAL_USER" != "root" ]; then
+    if ! sudo -u "$REAL_USER" launchctl list | grep -q "com.colima"; then
+        log_action "Loading Colima service..."
+        sudo -u "$REAL_USER" launchctl load "$COLIMA_PLIST"
+    else
+        log_info "Colima service is already loaded."
+    fi
+else
+    log_info "Skipping Colima service for root user."
+fi
+
+# --- Configure System Security and Access ---
 log_info "Checking security settings..."
 
 # FileVault Check
@@ -140,7 +250,7 @@ else
     log_info "Screen Sharing service is already enabled."
 fi
 
-# --- Step 4: Disable All Sleep Settings ---
+# --- Disable All Sleep Settings ---
 log_info "Checking power management settings..."
 # The grep pattern '^[[:space:]]*<setting> ' ensures we match the specific line
 # for each setting, avoiding partial matches with other settings.
@@ -160,7 +270,15 @@ if [[ $(pmset -g | grep '^[[:space:]]*powernap ' | awk '{print $2}') != "0" ]]; 
 fi
 log_info "Power settings configured to prevent sleep."
 
-# --- Step 5: Finalize Tailscale Connection ---
+# --- Verify Docker Stack ---
+log_info "Verifying Docker stack..."
+# Wait a moment for Colima to start if it was just loaded
+sleep 2
+test_command "Colima runtime" "colima status"
+test_command "Docker daemon" "docker ps"
+test_command "Docker Compose" "docker compose ls"
+
+# --- Finalize Tailscale Connection ---
 echo "\n--- Setup Complete ---"
 log_info "Verifying Tailscale connectivity..."
 if ! tailscale status | grep -q "active"; then

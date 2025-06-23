@@ -1,0 +1,7 @@
+# Development tools
+brew "go"
+brew "tmux"
+
+# Docker stack
+brew "colima"
+brew "docker"
