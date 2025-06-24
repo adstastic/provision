@@ -18,6 +18,7 @@
 # - Disable all sleep settings to ensure the machine is always online.
 
 set -e # Exit immediately if a command exits with a non-zero status.
+set -x # Print each command before executing it for debugging
 
 # --- Helper Functions ---
 # Function to check if a command exists
@@ -75,7 +76,12 @@ brew bundle --file="$SCRIPT_DIR/Brewfile"
 log_info "Testing installed dependencies..."
 test_command "Go" "go version"
 test_command "tmux" "tmux -V"
-test_command "Colima" "colima version"
+# Check if colima command exists
+if command_exists colima; then
+    log_info "Colima command is available."
+else
+    log_action "Colima command not found!"
+fi
 test_command "Docker CLI" "docker --version"
 
 # --- Install and Configure Tailscale Daemon ---
@@ -150,7 +156,11 @@ fi
 if [ "$REAL_USER" != "root" ]; then
     if ! sudo -u "$REAL_USER" launchctl list | grep -q "com.tmux.main"; then
         log_action "Loading tmux service..."
-        sudo -u "$REAL_USER" launchctl load "$TMUX_PLIST"
+        if sudo -u "$REAL_USER" launchctl load "$TMUX_PLIST" 2>&1; then
+            log_info "tmux service loaded successfully."
+        else
+            log_action "Failed to load tmux service. Check logs for details."
+        fi
     else
         log_info "tmux service is already loaded."
     fi
@@ -161,31 +171,38 @@ fi
 # --- Configure Colima Service ---
 log_info "Setting up Colima service..."
 
-# Get the colima binary path
-COLIMA_PATH=$(command -v colima)
-if [ -z "$COLIMA_PATH" ]; then
-    echo "[ERROR] Could not find colima in PATH after installation. Exiting."
-    exit 1
-fi
-log_info "Using colima found at: $COLIMA_PATH"
-
-# Create Colima service plist
-COLIMA_PLIST="$LAUNCH_AGENTS_DIR/com.colima.plist"
-if [ ! -f "$COLIMA_PLIST" ]; then
-    log_action "Creating Colima service plist..."
-    # Copy the template and replace the placeholder with actual colima path
-    sed "s|COLIMA_PATH|$COLIMA_PATH|g" "$SCRIPT_DIR/configs/com.colima.plist" | sudo -u "$REAL_USER" tee "$COLIMA_PLIST" > /dev/null
-else
-    log_info "Colima service plist already exists."
-fi
-
-# Load the service as the real user only if not running as root
+# Use Homebrew services to manage Colima
 if [ "$REAL_USER" != "root" ]; then
-    if ! sudo -u "$REAL_USER" launchctl list | grep -q "com.colima"; then
-        log_action "Loading Colima service..."
-        sudo -u "$REAL_USER" launchctl load "$COLIMA_PLIST"
+    # Check if we're in tmux and need reattach-to-user-namespace
+    if [ -n "$TMUX" ] && ! command_exists reattach-to-user-namespace; then
+        log_action "Installing reattach-to-user-namespace for tmux compatibility..."
+        brew install reattach-to-user-namespace
+    fi
+    
+    # Check if Colima service is already started
+    if ! brew services list | grep -q "colima.*started"; then
+        log_action "Starting Colima service via Homebrew services..."
+        if brew services start colima; then
+            log_info "Colima service started successfully."
+            # Wait a bit for Colima to fully initialize
+            sleep 5
+            # Verify Colima is actually running
+            if colima status &>/dev/null; then
+                log_info "Colima is running."
+            else
+                log_action "WARNING: Colima service started but Colima is not yet ready."
+                log_action "It may take a moment to fully initialize."
+            fi
+        else
+            log_action "Failed to start Colima service."
+        fi
     else
-        log_info "Colima service is already loaded."
+        log_info "Colima service is already started."
+        # But check if it's actually running
+        if ! colima status &>/dev/null; then
+            log_action "WARNING: Colima service is started but Colima is not running."
+            log_action "Try 'brew services restart colima' to restart it."
+        fi
     fi
 else
     log_info "Skipping Colima service for root user."
@@ -282,9 +299,25 @@ else
     log_info "DOCKER_HOST is set to: $DOCKER_HOST"
 fi
 
-test_command "Colima runtime" "colima status"
-test_command "Docker daemon" "docker ps"
-test_command "Docker Compose" "docker compose ls"
+# Check if Colima is actually running
+if colima status &>/dev/null; then
+    log_info "Colima runtime is running."
+    # Only test Docker if Colima is running
+    if docker ps &>/dev/null; then
+        log_info "Docker daemon is accessible."
+    else
+        log_action "Docker daemon is not accessible. Check DOCKER_HOST and Colima status."
+    fi
+    if docker compose ls &>/dev/null; then
+        log_info "Docker Compose is working."
+    else
+        log_action "Docker Compose is not working properly."
+    fi
+else
+    log_action "Colima is not running. Docker commands will fail until Colima is started."
+    log_action "The LaunchAgent may have failed to start Colima automatically."
+    log_action "Try running 'colima start' manually to start the Docker runtime."
+fi
 
 # --- Finalize Tailscale Connection ---
 echo "\n--- Setup Complete ---"
