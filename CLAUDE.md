@@ -74,6 +74,41 @@ Each section checks current state before making changes to maintain idempotency.
 
 ## Important Implementation Details
 
+### Python Development with uv
+Always use `uv` for Python operations in this repository. uv is an extremely fast Python package and project manager written in Rust.
+
+#### Common uv Commands:
+```bash
+# Run a Python script or command
+uv run python script.py
+uv run pytest tests/
+
+# Initialize a new Python project
+uv init
+
+# Add dependencies to a project
+uv add pytest typer sh
+
+# Remove dependencies
+uv remove package-name
+
+# Sync project dependencies (install from pyproject.toml/uv.lock)
+uv sync
+
+# Create/update lockfile
+uv lock
+
+# For legacy requirements.txt workflows (use sparingly):
+uv pip install -r requirements.txt
+uv pip install -e .
+```
+
+#### Key Points:
+- Prefer native uv commands (`uv add`, `uv sync`) over `uv pip`
+- Always use `uv run` to execute Python scripts and commands
+- uv automatically manages virtual environments
+- uv is 10-100x faster than pip
+
 ### Tailscale Installation
 - Compiled from source using Go rather than Homebrew package
 - Installed as system daemon using `tailscaled install-system-daemon`
@@ -92,3 +127,61 @@ Uses `/usr/libexec/ApplicationFirewall/socketfilterfw` for firewall management:
 
 ## Configuration Management Best Practices
 - Don't inline config file content. Use config files instead, and copy them to the correct locations.
+
+## Development Approach
+
+### Test-Driven Development (TDD)
+This project follows strict TDD practices:
+1. Write tests first (red phase)
+2. Write minimal code to pass tests (green phase)
+3. Refactor if needed (refactor phase)
+4. Commit after each phase/feature is complete
+
+### Git Workflow
+- Make commits after completing each phase of the shell script port
+- Use descriptive commit messages: `✅ Add [component]: [description]`
+- Examples:
+  - `✅ Add foundation: utils and CLI structure with tests`
+  - `✅ Add Homebrew: package installation with tests`
+
+### Architecture Decisions
+- Keep it minimal - avoid over-abstraction
+- Separate platform-specific code (macos.py, linux.py)
+- Use simple function delegation instead of classes/inheritance
+- Separate root and non-root operations clearly
+
+### Testing Strategy
+- Use pytest with pytest-mock for mocking system commands
+- Mock all external commands (sh library calls)
+- Test idempotency - functions should handle already-configured states
+- Organize tests by functionality:
+  - test_utils.py - Core utilities
+  - test_cli.py - CLI interface
+  - test_macos.py - macOS-specific implementations
+  - test_steps.py - Workflow orchestration
+
+### Learnings from Implementation
+
+#### Typer CLI Design
+- For single-command CLIs, use `invoke_without_command=True` and `callback=` instead of `@app.command()`
+- This creates a cleaner UX where users run `provision` instead of `provision setup`
+- Typer passes arguments as positional args, not kwargs - test assertions must match
+
+#### Python Project Structure with uv
+- Use `uv init --lib --name <name>` to create a library project
+- Add dependencies with `uv add` (not `uv pip install`)
+- Define CLI entry points in `pyproject.toml` under `[project.scripts]`
+- Always use `uv run` to execute commands in the project environment
+
+#### TDD Workflow
+1. Write failing tests first
+2. Implement minimal code to pass
+3. Run tests with `uv run pytest -v`
+4. Refactor if needed
+5. Commit when feature is complete
+
+#### Module Organization
+- Keep `__init__.py` minimal
+- Each module should have a clear, single responsibility
+- Use simple functions over classes for straightforward operations
+- Import order: stdlib, third-party, local modules
