@@ -2,6 +2,7 @@
 import sh
 import re
 import json
+import os
 from pathlib import Path
 from typing import Union, Optional
 from provision.utils import command_exists, log_info, log_action
@@ -51,7 +52,7 @@ def get_installed_tailscale_version() -> Optional[str]:
         if match:
             return match.group(1)
         return None
-    except sh.ErrorReturnCode:
+    except Exception:  # sh raises various ErrorReturnCode_X exceptions
         return None
 
 
@@ -65,7 +66,7 @@ def get_latest_tailscale_version() -> Optional[str]:
         if tag.startswith('v'):
             return tag[1:]
         return tag if tag else None
-    except (sh.ErrorReturnCode, json.JSONDecodeError, KeyError):
+    except (Exception, json.JSONDecodeError, KeyError):
         return None
 
 
@@ -81,3 +82,36 @@ def is_tailscale_up_to_date() -> bool:
         return True
     
     return installed == latest
+
+
+def install_tailscale(dry_run: bool = False) -> None:
+    """Install or update Tailscale from source."""
+    if check_tailscale():
+        if is_tailscale_up_to_date():
+            log_info("Tailscale is already installed and up to date.")
+            return
+        else:
+            if dry_run:
+                log_action("[DRY RUN] Would update Tailscale from source")
+                return
+            log_action("Tailscale is outdated. Updating from source...")
+    else:
+        if dry_run:
+            log_action("[DRY RUN] Would install Tailscale from source")
+            return
+        log_action("tailscaled not found. Installing Tailscale from source...")
+    
+    # Get GOPATH and update PATH
+    gopath = str(sh.go("env", "GOPATH")).strip()
+    os.environ['PATH'] = f"{os.environ.get('PATH', '')}:{gopath}/bin"
+    
+    # Install both tailscale and tailscaled
+    sh.go("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+
+
+def get_tailscaled_path() -> Optional[str]:
+    """Get the path to the tailscaled binary."""
+    try:
+        return str(sh.which("tailscaled")).strip()
+    except Exception:  # sh raises various ErrorReturnCode_X exceptions
+        return None

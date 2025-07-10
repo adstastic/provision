@@ -7,7 +7,7 @@ from pathlib import Path
 from provision.macos import (
     check_homebrew, install_homebrew, install_brewfile_packages,
     check_tailscale, get_installed_tailscale_version, get_latest_tailscale_version,
-    is_tailscale_up_to_date
+    is_tailscale_up_to_date, install_tailscale, get_tailscaled_path
 )
 
 
@@ -226,3 +226,89 @@ class TestTailscaleVersion:
         
         # If we can't get the latest version, assume current is up to date
         assert result is True
+
+
+class TestTailscaleInstallation:
+    """Tests for Tailscale installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch.dict('provision.macos.os.environ', {'PATH': '/usr/bin:/bin'})
+    @patch('provision.macos.is_tailscale_up_to_date')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_not_installed(self, mock_check, mock_up_to_date, mock_log_info, mock_log_action):
+        """Test installing Tailscale when not installed."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_check.return_value = False
+            mock_sh.go.return_value = "/home/user/go"  # Mock go env GOPATH output
+            
+            install_tailscale(dry_run=False)
+            
+            mock_check.assert_called_once()
+            mock_log_action.assert_called_with("tailscaled not found. Installing Tailscale from source...")
+            # Check go env GOPATH was called
+            mock_sh.go.assert_any_call("env", "GOPATH")
+            # Check go install was called
+            mock_sh.go.assert_any_call("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.is_tailscale_up_to_date')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_already_up_to_date(self, mock_check, mock_up_to_date, mock_log_info):
+        """Test installing Tailscale when already up to date."""
+        mock_check.return_value = True
+        mock_up_to_date.return_value = True
+        
+        install_tailscale(dry_run=False)
+        
+        mock_check.assert_called_once()
+        mock_up_to_date.assert_called_once()
+        mock_log_info.assert_called_with("Tailscale is already installed and up to date.")
+    
+    @patch('provision.macos.log_action')
+    @patch.dict('provision.macos.os.environ', {'PATH': '/usr/bin:/bin'})
+    @patch('provision.macos.is_tailscale_up_to_date')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_needs_update(self, mock_check, mock_up_to_date, mock_log_action):
+        """Test updating Tailscale when outdated."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_check.return_value = True
+            mock_up_to_date.return_value = False
+            mock_sh.go.return_value = "/home/user/go"
+            
+            install_tailscale(dry_run=False)
+            
+            mock_check.assert_called_once()
+            mock_up_to_date.assert_called_once()
+            mock_log_action.assert_called_with("Tailscale is outdated. Updating from source...")
+            mock_sh.go.assert_any_call("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_dry_run(self, mock_check, mock_log_action):
+        """Test installing Tailscale in dry-run mode."""
+        mock_check.return_value = False
+        
+        install_tailscale(dry_run=True)
+        
+        mock_check.assert_called_once()
+        mock_log_action.assert_called_with("[DRY RUN] Would install Tailscale from source")
+    
+    def test_get_tailscaled_path(self):
+        """Test getting the tailscaled binary path."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_sh.which.return_value = "/usr/local/bin/tailscaled"
+            
+            path = get_tailscaled_path()
+            
+            assert path == "/usr/local/bin/tailscaled"
+            mock_sh.which.assert_called_once_with("tailscaled")
+    
+    def test_get_tailscaled_path_not_found(self):
+        """Test getting tailscaled path when not found."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_sh.which.side_effect = sh.ErrorReturnCode_1("which", b"", b"tailscaled not found")
+            
+            path = get_tailscaled_path()
+            
+            assert path is None

@@ -233,4 +233,11 @@ The sh library provides a clean interface for shell commands:
 ```python
 sh.brew("bundle", f"--file={brewfile_path}")  # Runs: brew bundle --file=/path/to/Brewfile
 sh.curl("-fsSL", "https://...")  # Runs: curl -fsSL https://...
+sh.go("install", "package@version")  # Runs: go install package@version
 ```
+
+**Important**: sh dynamically creates command attributes based on what's in PATH. When testing:
+- Mock the entire sh module: `with patch('provision.macos.sh') as mock_sh:`
+- Then mock specific commands: `mock_sh.go.return_value = "output"`
+- Use `@patch.dict` for os.environ: `@patch.dict('provision.macos.os.environ', {'PATH': '/usr/bin'})`
+- sh raises various ErrorReturnCode_X exceptions, catch with generic `Exception`
