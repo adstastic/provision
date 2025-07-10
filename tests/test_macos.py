@@ -455,3 +455,205 @@ class TestTailscaleDNS:
         
         # Should show dry-run message
         assert any("[DRY RUN]" in str(call) for call in mock_log_action.call_args_list)
+
+
+class TestTmuxService:
+    """Tests for tmux service setup."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.sh.sudo')
+    @patch('provision.macos.sh.launchctl')
+    @patch('provision.macos.sh.which')
+    @patch('builtins.open', create=True)
+    @patch.object(Path, 'exists')
+    def test_setup_tmux_service_success(self, mock_exists, mock_open, mock_which, 
+                                       mock_launchctl, mock_sudo, mock_get_home,
+                                       mock_get_user, mock_log_info, mock_log_action):
+        """Test setting up tmux service when not configured."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        # Mock tmux binary path
+        mock_which.return_value = "/opt/homebrew/bin/tmux"
+        
+        # Mock path exists checks: LaunchAgents dir exists, plist doesn't
+        mock_exists.side_effect = [True, False]
+        
+        # Mock file operations
+        mock_file = MagicMock()
+        mock_file.read.return_value = "<?xml version=\"1.0\"?>\n<plist><string>TMUX_PATH_PLACEHOLDER</string></plist>"
+        mock_file.__enter__.return_value = mock_file
+        mock_file.__exit__.return_value = None
+        mock_open.return_value = mock_file
+        
+        # Mock launchctl list
+        mock_launchctl.list.return_value = "com.apple.Finder\ncom.apple.Dock"  # tmux not in list
+        
+        from provision.macos import setup_tmux_service
+        setup_tmux_service(dry_run=False)
+        
+        # Should create plist file and load service
+        mock_log_action.assert_any_call("Creating tmux service plist...")
+        # Verify launchctl load was called
+        assert any(call for call in mock_sudo.call_args_list 
+                  if len(call[0]) >= 4 and call[0][2] == "launchctl" and call[0][3] == "load")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.sh.launchctl')
+    @patch.object(Path, 'exists')
+    def test_setup_tmux_service_already_exists(self, mock_exists, mock_launchctl,
+                                              mock_get_home, mock_get_user, mock_log_info):
+        """Test tmux service setup when already configured (idempotency)."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        # Mock paths - both LaunchAgents dir and plist exist
+        mock_exists.side_effect = [True, True]
+        
+        # Mock launchctl list - tmux already loaded
+        mock_launchctl.list.return_value = "com.tmux.main\ncom.apple.Finder"
+        
+        from provision.macos import setup_tmux_service
+        setup_tmux_service(dry_run=False)
+        
+        # Should detect service is already configured
+        assert any("already" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    def test_setup_tmux_service_dry_run(self, mock_get_home, mock_get_user, mock_log_action):
+        """Test tmux service setup in dry-run mode."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        from provision.macos import setup_tmux_service
+        setup_tmux_service(dry_run=True)
+        
+        # Should show dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would setup tmux service")
+    
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.sh.which')
+    def test_setup_tmux_service_no_tmux_binary(self, mock_which, mock_get_home, mock_get_user):
+        """Test tmux service setup when tmux binary not found."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        # Mock no tmux binary
+        mock_which.side_effect = Exception("Command not found")
+        
+        from provision.macos import setup_tmux_service
+        with pytest.raises(RuntimeError, match="tmux binary not found"):
+            setup_tmux_service(dry_run=False)
+
+
+class TestColimaService:
+    """Tests for Colima service setup."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.sh.brew')
+    @patch('provision.macos.sh.colima')
+    @patch('time.sleep')
+    def test_setup_colima_service_success(self, mock_sleep, mock_colima, mock_brew, mock_get_user,
+                                         mock_log_info, mock_log_action):
+        """Test setting up Colima service when not running."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        # Mock brew services list - colima not started
+        mock_services = MagicMock()
+        mock_services.list.return_value = "redis       started\npostgresql  stopped\ncolima      stopped"
+        mock_services.start.return_value = None
+        mock_brew.services = mock_services
+        
+        # Mock colima status after start
+        mock_colima.status.return_value = "Colima is running"
+        
+        from provision.macos import setup_colima_service
+        setup_colima_service(dry_run=False)
+        
+        # Should start Colima service
+        mock_log_action.assert_any_call("Starting Colima service via Homebrew services...")
+        mock_services.start.assert_called_once_with("colima")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.sh.brew')
+    def test_setup_colima_service_already_running(self, mock_brew, mock_get_user, mock_log_info):
+        """Test Colima service setup when already running (idempotency)."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        # Mock brew services list - colima already started
+        mock_services = MagicMock()
+        mock_services.list.return_value = "redis       started\ncolima      started"
+        mock_brew.services = mock_services
+        
+        from provision.macos import setup_colima_service
+        setup_colima_service(dry_run=False)
+        
+        # Should detect service is already running
+        mock_log_info.assert_called_with("Colima service is already running.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.utils.get_real_user')
+    def test_setup_colima_service_dry_run(self, mock_get_user, mock_log_action):
+        """Test Colima service setup in dry-run mode."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        from provision.macos import setup_colima_service
+        setup_colima_service(dry_run=True)
+        
+        # Should show dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would setup Colima service")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.command_exists')
+    @patch('provision.macos.os.environ.get')
+    @patch('provision.macos.sh.brew')
+    @patch('time.sleep')
+    def test_setup_colima_with_reattach_dependency(self, mock_sleep, mock_brew, mock_env_get,
+                                                   mock_command_exists, mock_get_user, mock_log_action):
+        """Test Colima setup installs reattach-to-user-namespace when in tmux."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        # Mock being in tmux
+        mock_env_get.return_value = "/tmp/tmux-501/default"  # TMUX env var set
+        
+        # Mock reattach-to-user-namespace not installed
+        mock_command_exists.return_value = False
+        
+        # Mock brew services list - colima not started
+        mock_services = MagicMock()
+        mock_services.list.return_value = "colima      stopped"
+        mock_services.start.return_value = None
+        mock_brew.services = mock_services
+        
+        # Mock colima status check
+        with patch('provision.macos.sh') as mock_sh:
+            # Copy the original brew mock to the patched sh
+            mock_sh.brew = mock_brew
+            mock_sh.colima.status.return_value = "Colima is running"
+            
+            from provision.macos import setup_colima_service
+            setup_colima_service(dry_run=False)
+        
+        # Should install reattach-to-user-namespace
+        mock_log_action.assert_any_call("Installing reattach-to-user-namespace for tmux compatibility...")
+        mock_brew.assert_called_once_with("install", "reattach-to-user-namespace")

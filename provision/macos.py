@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import Union, Optional
-from provision.utils import command_exists, log_info, log_action
+from provision.utils import command_exists, log_info, log_action, get_real_user, get_real_home
 
 
 def check_homebrew() -> bool:
@@ -183,3 +183,120 @@ def configure_tailscale_dns(dry_run: bool = False) -> None:
         except Exception as e:
             # Interface might not exist or be configured
             continue
+
+
+def setup_tmux_service(dry_run: bool = False) -> None:
+    """Setup tmux service as LaunchAgent."""
+    if dry_run:
+        log_action("[DRY RUN] Would setup tmux service")
+        return
+    
+    # Get real user info (handle sudo)
+    real_user = get_real_user()
+    real_home = get_real_home()
+    
+    if not real_user or real_user == "root":
+        log_info("Skipping tmux service for root user.")
+        return
+    
+    log_info(f"Setting up tmux service for user: {real_user}")
+    
+    # Create LaunchAgents directory if it doesn't exist
+    launch_agents_dir = Path(real_home) / "Library" / "LaunchAgents"
+    if not launch_agents_dir.exists():
+        log_action("Creating LaunchAgents directory...")
+        sh.sudo("-u", real_user, "mkdir", "-p", str(launch_agents_dir))
+    
+    # Get tmux binary path
+    try:
+        tmux_path = str(sh.which("tmux")).strip()
+    except Exception:
+        raise RuntimeError("tmux binary not found")
+    
+    log_info(f"Using tmux found at: {tmux_path}")
+    
+    # Create tmux service plist
+    plist_path = launch_agents_dir / "com.tmux.main.plist"
+    if not plist_path.exists():
+        log_action("Creating tmux service plist...")
+        
+        # Read template and replace placeholder
+        template_path = Path(__file__).parent / "configs" / "com.tmux.main.plist"
+        with open(template_path, 'r') as f:
+            plist_content = f.read()
+        
+        plist_content = plist_content.replace("TMUX_PATH_PLACEHOLDER", tmux_path)
+        
+        # Write plist file as the real user
+        with open(plist_path, 'w') as f:
+            f.write(plist_content)
+        
+        # Set proper ownership
+        sh.sudo("chown", f"{real_user}:staff", str(plist_path))
+    else:
+        log_info("tmux service plist already exists.")
+    
+    # Load the service if not already loaded
+    try:
+        launchctl_list = str(sh.launchctl("list"))
+        if "com.tmux.main" not in launchctl_list:
+            log_action("Loading tmux service...")
+            sh.sudo("-u", real_user, "launchctl", "load", str(plist_path))
+            log_info("tmux service loaded successfully.")
+        else:
+            log_info("tmux service is already loaded.")
+    except Exception as e:
+        log_action(f"Failed to load tmux service: {e}")
+
+
+def setup_colima_service(dry_run: bool = False) -> None:
+    """Setup Colima Docker service via Homebrew services."""
+    if dry_run:
+        log_action("[DRY RUN] Would setup Colima service")
+        return
+    
+    # Get real user info
+    real_user = get_real_user()
+    
+    if not real_user or real_user == "root":
+        log_info("Skipping Colima service for root user.")
+        return
+    
+    log_info("Setting up Colima service...")
+    
+    # Check if we're in tmux and need reattach-to-user-namespace
+    if os.environ.get('TMUX') and not command_exists('reattach-to-user-namespace'):
+        log_action("Installing reattach-to-user-namespace for tmux compatibility...")
+        sh.brew("install", "reattach-to-user-namespace")
+    
+    # Check if Colima service is already started
+    try:
+        services_list = str(sh.brew.services.list())
+        # Check if colima line contains "started"
+        for line in services_list.split('\n'):
+            if "colima" in line and "started" in line:
+                log_info("Colima service is already running.")
+                return
+    except Exception:
+        # brew services might not be available
+        pass
+    
+    # Start Colima service
+    log_action("Starting Colima service via Homebrew services...")
+    try:
+        sh.brew.services.start("colima")
+        log_info("Colima service started successfully.")
+        
+        # Wait a bit for Colima to initialize
+        import time
+        time.sleep(5)
+        
+        # Verify Colima is running
+        try:
+            sh.colima.status()
+            log_info("Colima is running.")
+        except Exception:
+            log_action("WARNING: Colima service started but Colima is not yet ready.")
+            log_action("It may take a moment to fully initialize.")
+    except Exception as e:
+        log_action(f"Failed to start Colima service: {e}")

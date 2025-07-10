@@ -261,3 +261,43 @@ sh.go("install", "package@version")  # Runs: go install package@version
 - When mocking `sh.networksetup` with `side_effect`, provide responses in order
 - Mock `sh.sudo.networksetup` separately from `sh.networksetup` for privileged commands
 - Use `call` from unittest.mock to verify complex command sequences
+
+### Learnings from Service Configuration Phase
+
+#### LaunchAgent Management
+- User-level services use LaunchAgents in `~/Library/LaunchAgents/`
+- Always run LaunchAgent operations as the real user (use `sudo -u`)
+- Check service status with `launchctl list`
+- Load services with `launchctl load <plist>`
+- Plist files should be owned by the user (`chown user:staff`)
+
+#### Template File Management
+- Store plist templates in `provision/configs/` directory
+- Use string replacement for dynamic values (e.g., `TMUX_PATH_PLACEHOLDER`)
+- Read templates with standard file operations, not package resources
+- Copy templates to appropriate system locations
+
+#### Homebrew Services
+- Use `brew services list` to check service status
+- Parse output line-by-line to check if specific service is "started"
+- Start services with `brew services start <service>`
+- Services like Colima may need time to initialize (use `time.sleep()`)
+
+#### Testing Complex Path Operations
+- For complex Path mocking, use `@patch.object(Path, 'exists')`
+- Mock `side_effect` with a list of return values for sequential calls
+- Simplify tests by focusing on the behavior being tested
+
+#### Service Dependencies
+- Check for tmux environment with `os.environ.get('TMUX')`
+- Install `reattach-to-user-namespace` when running in tmux
+- Both tmux and Colima services are user-level (not system daemons)
+
+#### Mock Patterns for sh Library
+- When mocking chained calls like `sh.brew.services.list()`:
+  ```python
+  mock_services = MagicMock()
+  mock_services.list.return_value = "output"
+  mock_brew.services = mock_services
+  ```
+- For dynamic command attributes, mock the entire sh module when needed

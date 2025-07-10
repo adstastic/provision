@@ -16,8 +16,8 @@
 - [x] DNS configuration for MagicDNS
 
 ## Phase 3: Service Configuration
-- [ ] tmux service setup
-- [ ] Colima (Docker) service setup
+- [x] tmux service setup
+- [x] Colima (Docker) service setup
 
 ## Phase 4: Security Configuration
 - [ ] FileVault management

@@ -52,6 +52,21 @@ def setup_tailscale(dry_run: bool = False, user_only: bool = False) -> None:
         raise NotImplementedError(f"Platform {current_platform} is not supported yet")
 
 
+def configure_services(dry_run: bool = False, user_only: bool = False) -> None:
+    """Configure services based on the platform."""
+    current_platform = platform.system()
+    
+    if current_platform == 'Darwin':
+        log_info("Configuring services for macOS...")
+        
+        # Both services are user-level, so we always run them
+        from provision.macos import setup_tmux_service, setup_colima_service
+        setup_tmux_service(dry_run=dry_run)
+        setup_colima_service(dry_run=dry_run)
+    else:
+        raise NotImplementedError(f"Platform {current_platform} is not supported yet")
+
+
 def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     """Main provisioning workflow - delegates to platform-specific implementations."""
     current_platform = platform.system()
@@ -65,7 +80,9 @@ def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     # Phase 2: Tailscale setup
     setup_tailscale(dry_run=dry_run, user_only=user_only)
     
-    # TODO: Phase 3: Service configuration
+    # Phase 3: Service configuration
+    configure_services(dry_run=dry_run, user_only=user_only)
+    
     # TODO: Phase 4: Security configuration
     # TODO: Phase 5: System configuration
     # TODO: Phase 6: Verification
