@@ -20,9 +20,9 @@
 - [x] Colima (Docker) service setup
 
 ## Phase 4: Security Configuration
-- [ ] FileVault management
-- [ ] SSH disabling
-- [ ] Firewall configuration
+- [x] FileVault management
+- [x] SSH disabling
+- [x] Firewall configuration
 
 ## Phase 5: System Configuration
 - [ ] Screen sharing setup

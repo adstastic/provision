@@ -657,3 +657,223 @@ class TestColimaService:
         # Should install reattach-to-user-namespace
         mock_log_action.assert_any_call("Installing reattach-to-user-namespace for tmux compatibility...")
         mock_brew.assert_called_once_with("install", "reattach-to-user-namespace")
+
+
+class TestFileVaultManagement:
+    """Tests for FileVault management."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_when_enabled(self, mock_sudo, mock_log_info, mock_log_action):
+        """Test disabling FileVault when it's enabled."""
+        # Mock fdesetup status showing FileVault is on
+        mock_sudo.fdesetup.return_value = "FileVault is On."
+        
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=False)
+        
+        # Should check status and disable
+        mock_sudo.fdesetup.assert_any_call("status")
+        mock_log_action.assert_called_with("FileVault is enabled. Disabling for headless boot...")
+        mock_sudo.fdesetup.assert_any_call("disable")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_already_disabled(self, mock_sudo, mock_log_info):
+        """Test FileVault management when already disabled (idempotency)."""
+        # Mock fdesetup status showing FileVault is off
+        mock_sudo.fdesetup.return_value = "FileVault is Off."
+        
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=False)
+        
+        # Should only check status, not disable
+        mock_sudo.fdesetup.assert_called_once_with("status")
+        mock_log_info.assert_called_with("FileVault is already disabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_dry_run(self, mock_sudo, mock_log_action):
+        """Test FileVault management in dry-run mode."""
+        # Mock fdesetup status showing FileVault is on
+        mock_sudo.fdesetup.return_value = "FileVault is On."
+        
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=True)
+        
+        # Should check status but not disable
+        mock_sudo.fdesetup.assert_called_once_with("status")
+        mock_log_action.assert_called_with("[DRY RUN] Would disable FileVault")
+
+
+class TestSSHManagement:
+    """Tests for SSH (Remote Login) management."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_disable_ssh_when_enabled(self, mock_sudo, mock_log_info, mock_log_action):
+        """Test disabling SSH when it's enabled."""
+        # Mock systemsetup showing Remote Login is on
+        mock_sudo.systemsetup.return_value = "Remote Login: On"
+        
+        from provision.macos import disable_ssh
+        disable_ssh(dry_run=False)
+        
+        # Should check status and disable
+        mock_sudo.systemsetup.assert_any_call("-getremotelogin")
+        mock_log_action.assert_called_with("Standard SSH (Remote Login) is enabled. Disabling...")
+        mock_sudo.systemsetup.assert_any_call("-setremotelogin", "off")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_disable_ssh_already_disabled(self, mock_sudo, mock_log_info):
+        """Test SSH management when already disabled (idempotency)."""
+        # Mock systemsetup showing Remote Login is off
+        mock_sudo.systemsetup.return_value = "Remote Login: Off"
+        
+        from provision.macos import disable_ssh
+        disable_ssh(dry_run=False)
+        
+        # Should only check status, not disable
+        mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
+        mock_log_info.assert_called_with("Standard SSH (Remote Login) is already disabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.sudo')
+    def test_disable_ssh_dry_run(self, mock_sudo, mock_log_action):
+        """Test SSH disabling in dry-run mode."""
+        # Mock systemsetup showing Remote Login is on
+        mock_sudo.systemsetup.return_value = "Remote Login: On"
+        
+        from provision.macos import disable_ssh
+        disable_ssh(dry_run=True)
+        
+        # Should check status but not disable
+        mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
+        mock_log_action.assert_called_with("[DRY RUN] Would disable SSH (Remote Login)")
+
+
+class TestFirewallConfiguration:
+    """Tests for Firewall configuration."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_when_disabled(self, mock_sudo, mock_get_path, 
+                                            mock_log_info, mock_log_action):
+        """Test enabling and configuring firewall when disabled."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.side_effect = [
+            "Firewall is disabled.",  # getglobalstate
+            "",  # setglobalstate
+            "",  # setallowsigned
+            "",  # setstealthmode
+            "Applications:",  # listapps (empty list)
+            "",  # add tailscaled
+            "",  # unblockapp tailscaled
+            "Applications:",  # listapps (empty list)
+            "",  # add ARDAgent
+            "",  # unblockapp ARDAgent
+        ]
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=False)
+        
+        # Should enable firewall with all settings
+        expected_calls = [
+            call("--getglobalstate"),
+            call("--setglobalstate", "on"),
+            call("--setallowsigned", "on"),
+            call("--setstealthmode", "on"),
+        ]
+        # Verify first 4 calls for firewall enablement
+        actual_calls = mock_socketfilter.call_args_list[:4]
+        assert actual_calls == expected_calls
+        
+        mock_log_action.assert_any_call("Firewall is disabled. Enabling firewall...")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_already_enabled(self, mock_sudo, mock_get_path, mock_log_info):
+        """Test firewall configuration when already enabled (idempotency)."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.side_effect = [
+            "Firewall is enabled.",  # getglobalstate
+            f"Applications:\n/opt/homebrew/bin/tailscaled",  # listapps with tailscaled
+            "",  # unblockapp tailscaled
+            f"Applications:\n/System/Library/CoreServices/RemoteManagement/ARDAgent.app",  # listapps with ARDAgent
+            "",  # unblockapp ARDAgent
+        ]
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=False)
+        
+        # Should detect firewall is enabled
+        mock_log_info.assert_any_call("Firewall is already enabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_dry_run(self, mock_sudo, mock_get_path, mock_log_action):
+        """Test firewall configuration in dry-run mode."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.return_value = "Firewall is disabled."
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=True)
+        
+        # Should show dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would enable and configure firewall")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_adds_missing_exceptions(self, mock_sudo, mock_get_path, mock_log_action):
+        """Test that firewall adds only missing exceptions."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.side_effect = [
+            "Firewall is enabled.",  # getglobalstate
+            "Applications:\n/some/other/app",  # listapps without tailscaled
+            "",  # add tailscaled
+            "",  # unblockapp tailscaled
+            f"Applications:\n/System/Library/CoreServices/RemoteManagement/ARDAgent.app",  # listapps with ARDAgent
+            "",  # unblockapp ARDAgent (always called)
+        ]
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=False)
+        
+        # Should add missing exception
+        mock_log_action.assert_any_call("Adding firewall exception for: /opt/homebrew/bin/tailscaled")

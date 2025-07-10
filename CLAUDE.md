@@ -301,3 +301,45 @@ sh.go("install", "package@version")  # Runs: go install package@version
   mock_brew.services = mock_services
   ```
 - For dynamic command attributes, mock the entire sh module when needed
+
+### Learnings from Security Configuration Phase
+
+#### FileVault Management
+- Use `fdesetup status` to check FileVault state
+- Output contains "FileVault is On" or "FileVault is Off"
+- Disable with `sudo fdesetup disable`
+- Disabling FileVault is necessary for headless boot without physical login
+
+#### SSH Service Management
+- Use `systemsetup -getremotelogin` to check SSH status
+- Output format: "Remote Login: On" or "Remote Login: Off"
+- Disable with `sudo systemsetup -setremotelogin off`
+- We disable standard SSH in favor of Tailscale SSH for better security
+
+#### Firewall Configuration with socketfilterfw
+- The socketfilterfw binary path: `/usr/libexec/ApplicationFirewall/socketfilterfw`
+- Check status with `--getglobalstate`
+- Enable firewall: `--setglobalstate on`
+- Enable stealth mode: `--setstealthmode on`
+- Allow signed apps: `--setallowsigned on`
+- List apps: `--listapps`
+- Add exception: `--add <path>`
+- Unblock app: `--unblockapp <path>` (always call after adding)
+
+#### Testing Patterns for Dynamic Command Paths
+- For commands with full paths, use `getattr(sh.sudo, path)`:
+  ```python
+  socketfilter = getattr(sh.sudo, SOCKET_FILTER)
+  socketfilter("--getglobalstate")
+  ```
+- In tests, mock with `setattr`:
+  ```python
+  mock_socketfilter = MagicMock()
+  setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+  ```
+
+#### Security Configuration Architecture
+- All security functions require root access
+- In user-only mode, skip the entire security configuration phase
+- Group related security settings together for clarity
+- Always check current state before making changes (idempotency)

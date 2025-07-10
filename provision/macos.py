@@ -300,3 +300,109 @@ def setup_colima_service(dry_run: bool = False) -> None:
             log_action("It may take a moment to fully initialize.")
     except Exception as e:
         log_action(f"Failed to start Colima service: {e}")
+
+
+def manage_filevault(dry_run: bool = False) -> None:
+    """Manage FileVault - disable it for headless boot capability."""
+    try:
+        # Check FileVault status
+        status_output = str(sh.sudo.fdesetup("status"))
+        
+        if "FileVault is On" in status_output:
+            if dry_run:
+                log_action("[DRY RUN] Would disable FileVault")
+                return
+            
+            log_action("FileVault is enabled. Disabling for headless boot...")
+            sh.sudo.fdesetup("disable")
+        else:
+            log_info("FileVault is already disabled.")
+    except Exception as e:
+        log_action(f"Failed to manage FileVault: {e}")
+
+
+def disable_ssh(dry_run: bool = False) -> None:
+    """Disable standard SSH (Remote Login) service."""
+    try:
+        # Check SSH status
+        status_output = str(sh.sudo.systemsetup("-getremotelogin"))
+        
+        if "Remote Login: On" in status_output:
+            if dry_run:
+                log_action("[DRY RUN] Would disable SSH (Remote Login)")
+                return
+            
+            log_action("Standard SSH (Remote Login) is enabled. Disabling...")
+            sh.sudo.systemsetup("-setremotelogin", "off")
+        else:
+            log_info("Standard SSH (Remote Login) is already disabled.")
+    except Exception as e:
+        log_action(f"Failed to disable SSH: {e}")
+
+
+def configure_firewall(dry_run: bool = False) -> None:
+    """Configure macOS firewall with stealth mode and exceptions."""
+    SOCKET_FILTER = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+    
+    try:
+        # Check firewall status
+        firewall_status = str(getattr(sh.sudo, SOCKET_FILTER)("--getglobalstate"))
+        
+        if "Firewall is disabled" in firewall_status or "disabled" in firewall_status:
+            if dry_run:
+                log_action("[DRY RUN] Would enable and configure firewall")
+                return
+            
+            log_action("Firewall is disabled. Enabling firewall...")
+            socketfilter = getattr(sh.sudo, SOCKET_FILTER)
+            socketfilter("--setglobalstate", "on")
+            socketfilter("--setallowsigned", "on")
+            socketfilter("--setstealthmode", "on")
+        else:
+            log_info("Firewall is already enabled.")
+        
+        if dry_run:
+            return
+        
+        # Configure firewall exceptions
+        log_info("Verifying firewall exceptions for continuity services...")
+        
+        # Get tailscaled path
+        tailscaled_path = get_tailscaled_path()
+        if not tailscaled_path:
+            log_action("WARNING: tailscaled path not found, skipping firewall exception")
+            tailscaled_path = None
+        
+        # Services to add exceptions for
+        services_to_check = [
+            tailscaled_path,
+            "/System/Library/CoreServices/RemoteManagement/ARDAgent.app",
+            "/System/Library/CoreServices/UniversalControl.app",
+            "/usr/libexec/sharingd",
+            "/usr/libexec/rapportd"
+        ]
+        
+        socketfilter = getattr(sh.sudo, SOCKET_FILTER)
+        
+        for service_path in services_to_check:
+            if not service_path:
+                continue
+                
+            try:
+                # Check if service is already in firewall list
+                list_output = str(socketfilter("--listapps"))
+                
+                if service_path not in list_output:
+                    log_action(f"Adding firewall exception for: {service_path}")
+                    socketfilter("--add", service_path)
+                
+                # Always ensure the app is unblocked
+                socketfilter("--unblockapp", service_path)
+            except Exception as e:
+                # Some services might not exist on all systems
+                continue
+        
+        log_info("Firewall exceptions are configured.")
+        
+    except Exception as e:
+        log_action(f"Failed to configure firewall: {e}")

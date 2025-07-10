@@ -67,6 +67,32 @@ def configure_services(dry_run: bool = False, user_only: bool = False) -> None:
         raise NotImplementedError(f"Platform {current_platform} is not supported yet")
 
 
+def configure_security(dry_run: bool = False, user_only: bool = False) -> None:
+    """Configure security settings based on the platform."""
+    current_platform = platform.system()
+    
+    if current_platform == 'Darwin':
+        if user_only:
+            log_info("Skipping security configuration in user-only mode (requires root).")
+            return
+            
+        log_info("Configuring security settings for macOS...")
+        
+        # Import security functions
+        from provision.macos import manage_filevault, disable_ssh, configure_firewall
+        
+        # Manage FileVault
+        manage_filevault(dry_run=dry_run)
+        
+        # Disable standard SSH
+        disable_ssh(dry_run=dry_run)
+        
+        # Configure firewall
+        configure_firewall(dry_run=dry_run)
+    else:
+        raise NotImplementedError(f"Platform {current_platform} is not supported yet")
+
+
 def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     """Main provisioning workflow - delegates to platform-specific implementations."""
     current_platform = platform.system()
@@ -83,6 +109,8 @@ def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     # Phase 3: Service configuration
     configure_services(dry_run=dry_run, user_only=user_only)
     
-    # TODO: Phase 4: Security configuration
+    # Phase 4: Security configuration
+    configure_security(dry_run=dry_run, user_only=user_only)
+    
     # TODO: Phase 5: System configuration
     # TODO: Phase 6: Verification

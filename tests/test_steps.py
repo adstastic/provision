@@ -11,10 +11,12 @@ class TestProvisionSystem:
     """Tests for the main provisioning workflow."""
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
-    def test_provision_system_on_macos(self, mock_install_deps, mock_setup_ts, mock_configure_services, mock_platform):
+    def test_provision_system_on_macos(self, mock_install_deps, mock_setup_ts, mock_configure_services, 
+                                      mock_configure_security, mock_platform):
         """Test provisioning workflow on macOS."""
         mock_platform.return_value = 'Darwin'
         
@@ -23,12 +25,15 @@ class TestProvisionSystem:
         mock_install_deps.assert_called_once_with(dry_run=False, user_only=False)
         mock_setup_ts.assert_called_once_with(dry_run=False, user_only=False)
         mock_configure_services.assert_called_once_with(dry_run=False, user_only=False)
+        mock_configure_security.assert_called_once_with(dry_run=False, user_only=False)
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
-    def test_provision_system_dry_run(self, mock_install_deps, mock_setup_ts, mock_configure_services, mock_platform):
+    def test_provision_system_dry_run(self, mock_install_deps, mock_setup_ts, mock_configure_services, 
+                                     mock_configure_security, mock_platform):
         """Test provisioning workflow in dry-run mode."""
         mock_platform.return_value = 'Darwin'
         
@@ -37,12 +42,15 @@ class TestProvisionSystem:
         mock_install_deps.assert_called_once_with(dry_run=True, user_only=False)
         mock_setup_ts.assert_called_once_with(dry_run=True, user_only=False)
         mock_configure_services.assert_called_once_with(dry_run=True, user_only=False)
+        mock_configure_security.assert_called_once_with(dry_run=True, user_only=False)
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
-    def test_provision_system_user_only(self, mock_install_deps, mock_setup_ts, mock_configure_services, mock_platform):
+    def test_provision_system_user_only(self, mock_install_deps, mock_setup_ts, mock_configure_services,
+                                       mock_configure_security, mock_platform):
         """Test provisioning workflow in user-only mode."""
         mock_platform.return_value = 'Darwin'
         
@@ -51,6 +59,7 @@ class TestProvisionSystem:
         mock_install_deps.assert_called_once_with(dry_run=False, user_only=True)
         mock_setup_ts.assert_called_once_with(dry_run=False, user_only=True)
         mock_configure_services.assert_called_once_with(dry_run=False, user_only=True)
+        mock_configure_security.assert_called_once_with(dry_run=False, user_only=True)
     
     @patch('provision.steps.platform.system')
     def test_provision_system_unsupported_platform(self, mock_platform):
@@ -172,3 +181,64 @@ class TestServiceConfiguration:
             # Should call both with dry_run=True
             mock_setup_tmux.assert_called_once_with(dry_run=True)
             mock_setup_colima.assert_called_once_with(dry_run=True)
+
+
+class TestSecurityConfiguration:
+    """Tests for security configuration phase."""
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_configure_security_macos(self, mock_platform, mock_log_info):
+        """Test security configuration on macOS."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.manage_filevault') as mock_filevault, \
+             patch('provision.macos.disable_ssh') as mock_ssh, \
+             patch('provision.macos.configure_firewall') as mock_firewall:
+            
+            from provision.steps import configure_security
+            configure_security(dry_run=False, user_only=False)
+            
+            # Should call all security functions
+            mock_filevault.assert_called_once_with(dry_run=False)
+            mock_ssh.assert_called_once_with(dry_run=False)
+            mock_firewall.assert_called_once_with(dry_run=False)
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_configure_security_macos_dry_run(self, mock_platform, mock_log_info):
+        """Test security configuration in dry-run mode."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.manage_filevault') as mock_filevault, \
+             patch('provision.macos.disable_ssh') as mock_ssh, \
+             patch('provision.macos.configure_firewall') as mock_firewall:
+            
+            from provision.steps import configure_security
+            configure_security(dry_run=True, user_only=False)
+            
+            # Should call all with dry_run=True
+            mock_filevault.assert_called_once_with(dry_run=True)
+            mock_ssh.assert_called_once_with(dry_run=True)
+            mock_firewall.assert_called_once_with(dry_run=True)
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_configure_security_macos_user_only(self, mock_platform, mock_log_info):
+        """Test security configuration in user-only mode (skips root operations)."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.manage_filevault') as mock_filevault, \
+             patch('provision.macos.disable_ssh') as mock_ssh, \
+             patch('provision.macos.configure_firewall') as mock_firewall:
+            
+            from provision.steps import configure_security
+            configure_security(dry_run=False, user_only=True)
+            
+            # Should skip all security functions (they all require root)
+            mock_filevault.assert_not_called()
+            mock_ssh.assert_not_called()
+            mock_firewall.assert_not_called()
+            
+            # Should log that we're skipping
+            assert any("Skipping security configuration" in str(call) for call in mock_log_info.call_args_list)
