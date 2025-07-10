@@ -2,8 +2,9 @@
 import pytest
 from unittest.mock import patch, MagicMock, call
 import sh
+from pathlib import Path
 
-from provision.macos import check_homebrew, install_homebrew
+from provision.macos import check_homebrew, install_homebrew, install_brewfile_packages
 
 
 class TestHomebrewCheck:
@@ -71,3 +72,38 @@ class TestHomebrewInstallation:
         
         mock_check.assert_called_once()
         mock_log_action.assert_called_with("[DRY RUN] Would install Homebrew")
+
+
+class TestBrewfileInstallation:
+    """Tests for Brewfile package installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.brew')
+    def test_install_brewfile_packages(self, mock_brew, mock_log_action):
+        """Test installing packages from Brewfile."""
+        brewfile_path = "/path/to/Brewfile"
+        
+        install_brewfile_packages(brewfile_path, dry_run=False)
+        
+        mock_log_action.assert_called_with("Installing packages from Brewfile...")
+        mock_brew.assert_called_once_with("bundle", f"--file={brewfile_path}")
+    
+    @patch('provision.macos.log_action')
+    def test_install_brewfile_packages_dry_run(self, mock_log_action):
+        """Test installing packages in dry-run mode."""
+        brewfile_path = "/path/to/Brewfile"
+        
+        install_brewfile_packages(brewfile_path, dry_run=True)
+        
+        mock_log_action.assert_called_with(f"[DRY RUN] Would install packages from {brewfile_path}")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.brew')
+    def test_install_brewfile_packages_with_path_object(self, mock_brew, mock_log_action):
+        """Test installing packages with Path object."""
+        brewfile_path = Path("/path/to/Brewfile")
+        
+        install_brewfile_packages(brewfile_path, dry_run=False)
+        
+        mock_log_action.assert_called_with("Installing packages from Brewfile...")
+        mock_brew.assert_called_once_with("bundle", f"--file={brewfile_path}")
