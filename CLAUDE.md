@@ -185,3 +185,23 @@ This project follows strict TDD practices:
 - Each module should have a clear, single responsibility
 - Use simple functions over classes for straightforward operations
 - Import order: stdlib, third-party, local modules
+
+### Development Workflow
+
+#### Module-by-Module TDD Process
+Follow this process for each module/feature:
+1. Write failing tests first (red phase)
+2. Run tests to verify they fail
+3. Implement minimal code to pass tests (green phase)
+4. Run tests to verify they pass
+5. Refactor if needed (refactor phase)
+6. Commit with descriptive message
+7. Update BACKLOG.md with progress
+8. Update CLAUDE.md with any learnings
+
+#### Documentation Updates
+After each task completion:
+- **BACKLOG.md**: Mark completed items, add any new discovered tasks
+- **CLAUDE.md**: Document learnings, patterns, or gotchas discovered during implementation
+
+This ensures knowledge is captured immediately while context is fresh.
