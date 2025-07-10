@@ -33,3 +33,8 @@ def install_brewfile_packages(brewfile_path: Union[str, Path], dry_run: bool = F
     
     log_action("Installing packages from Brewfile...")
     sh.brew("bundle", f"--file={brewfile_path}")
+
+
+def check_tailscale() -> bool:
+    """Check if Tailscale is installed."""
+    return command_exists('tailscaled')

@@ -4,7 +4,10 @@ from unittest.mock import patch, MagicMock, call
 import sh
 from pathlib import Path
 
-from provision.macos import check_homebrew, install_homebrew, install_brewfile_packages
+from provision.macos import (
+    check_homebrew, install_homebrew, install_brewfile_packages,
+    check_tailscale
+)
 
 
 class TestHomebrewCheck:
@@ -107,3 +110,27 @@ class TestBrewfileInstallation:
         
         mock_log_action.assert_called_with("Installing packages from Brewfile...")
         mock_brew.assert_called_once_with("bundle", f"--file={brewfile_path}")
+
+
+class TestTailscaleCheck:
+    """Tests for Tailscale detection."""
+    
+    @patch('provision.macos.command_exists')
+    def test_check_tailscale_installed(self, mock_command_exists):
+        """Test detecting when Tailscale is installed."""
+        mock_command_exists.return_value = True
+        
+        result = check_tailscale()
+        
+        assert result is True
+        mock_command_exists.assert_called_once_with('tailscaled')
+    
+    @patch('provision.macos.command_exists')
+    def test_check_tailscale_not_installed(self, mock_command_exists):
+        """Test detecting when Tailscale is not installed."""
+        mock_command_exists.return_value = False
+        
+        result = check_tailscale()
+        
+        assert result is False
+        mock_command_exists.assert_called_once_with('tailscaled')
