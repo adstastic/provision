@@ -6,7 +6,8 @@ from pathlib import Path
 
 from provision.macos import (
     check_homebrew, install_homebrew, install_brewfile_packages,
-    check_tailscale
+    check_tailscale, get_installed_tailscale_version, get_latest_tailscale_version,
+    is_tailscale_up_to_date
 )
 
 
@@ -134,3 +135,94 @@ class TestTailscaleCheck:
         
         assert result is False
         mock_command_exists.assert_called_once_with('tailscaled')
+
+
+class TestTailscaleVersion:
+    """Tests for Tailscale version checking."""
+    
+    @patch('provision.macos.sh.tailscale')
+    def test_get_installed_tailscale_version(self, mock_tailscale):
+        """Test getting the installed Tailscale version."""
+        mock_tailscale.return_value = "  tailscale commit: 1234567890abcdef\n  other/third/v1.58.2-t1234567890a\n  go version: go1.21.1\n"
+        
+        version = get_installed_tailscale_version()
+        
+        assert version == "1.58.2"
+        mock_tailscale.assert_called_once_with("version")
+    
+    @patch('provision.macos.sh.tailscale')
+    def test_get_installed_tailscale_version_not_found(self, mock_tailscale):
+        """Test getting version when tailscale command fails."""
+        mock_tailscale.side_effect = sh.ErrorReturnCode_1("tailscale", b"", b"command not found")
+        
+        version = get_installed_tailscale_version()
+        
+        assert version is None
+    
+    @patch('provision.macos.sh.curl')
+    def test_get_latest_tailscale_version(self, mock_curl):
+        """Test getting the latest Tailscale version from GitHub."""
+        mock_response = '{"tag_name": "v1.60.0", "name": "v1.60.0"}'
+        mock_curl.return_value = mock_response
+        
+        version = get_latest_tailscale_version()
+        
+        assert version == "1.60.0"
+        mock_curl.assert_called_once_with(
+            "-s",
+            "https://api.github.com/repos/tailscale/tailscale/releases/latest"
+        )
+    
+    @patch('provision.macos.sh.curl')
+    def test_get_latest_tailscale_version_error(self, mock_curl):
+        """Test handling errors when fetching latest version."""
+        mock_curl.side_effect = sh.ErrorReturnCode_1("curl", b"", b"network error")
+        
+        version = get_latest_tailscale_version()
+        
+        assert version is None
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_true(self, mock_installed, mock_latest):
+        """Test when Tailscale is up to date."""
+        mock_installed.return_value = "1.60.0"
+        mock_latest.return_value = "1.60.0"
+        
+        result = is_tailscale_up_to_date()
+        
+        assert result is True
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_false(self, mock_installed, mock_latest):
+        """Test when Tailscale is outdated."""
+        mock_installed.return_value = "1.58.2"
+        mock_latest.return_value = "1.60.0"
+        
+        result = is_tailscale_up_to_date()
+        
+        assert result is False
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_not_installed(self, mock_installed, mock_latest):
+        """Test when Tailscale is not installed."""
+        mock_installed.return_value = None
+        mock_latest.return_value = "1.60.0"
+        
+        result = is_tailscale_up_to_date()
+        
+        assert result is False
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_cannot_check(self, mock_installed, mock_latest):
+        """Test when we cannot determine the latest version."""
+        mock_installed.return_value = "1.58.2"
+        mock_latest.return_value = None
+        
+        result = is_tailscale_up_to_date()
+        
+        # If we can't get the latest version, assume current is up to date
+        assert result is True

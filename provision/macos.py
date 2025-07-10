@@ -1,7 +1,9 @@
 """macOS-specific provisioning functions."""
 import sh
+import re
+import json
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 from provision.utils import command_exists, log_info, log_action
 
 
@@ -38,3 +40,44 @@ def install_brewfile_packages(brewfile_path: Union[str, Path], dry_run: bool = F
 def check_tailscale() -> bool:
     """Check if Tailscale is installed."""
     return command_exists('tailscaled')
+
+
+def get_installed_tailscale_version() -> Optional[str]:
+    """Get the installed Tailscale version."""
+    try:
+        output = str(sh.tailscale("version"))
+        # Parse version from output like "other/third/v1.58.2-t1234567890a"
+        match = re.search(r'/v(\d+\.\d+\.\d+)', output)
+        if match:
+            return match.group(1)
+        return None
+    except sh.ErrorReturnCode:
+        return None
+
+
+def get_latest_tailscale_version() -> Optional[str]:
+    """Get the latest Tailscale version from GitHub."""
+    try:
+        response = str(sh.curl("-s", "https://api.github.com/repos/tailscale/tailscale/releases/latest"))
+        data = json.loads(response)
+        tag = data.get('tag_name', '')
+        # Remove 'v' prefix if present
+        if tag.startswith('v'):
+            return tag[1:]
+        return tag if tag else None
+    except (sh.ErrorReturnCode, json.JSONDecodeError, KeyError):
+        return None
+
+
+def is_tailscale_up_to_date() -> bool:
+    """Check if Tailscale is up to date."""
+    installed = get_installed_tailscale_version()
+    if installed is None:
+        return False
+    
+    latest = get_latest_tailscale_version()
+    if latest is None:
+        # Can't determine latest version, assume current is ok
+        return True
+    
+    return installed == latest
