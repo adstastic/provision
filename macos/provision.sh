@@ -113,6 +113,24 @@ else
     log_info "Tailscale system daemon is already installed."
 fi
 
+# Configure DNS for Tailscale MagicDNS
+log_info "Configuring DNS for Tailscale MagicDNS..."
+TAILSCALE_DNS="100.100.100.100"
+
+# Configure DNS for all network interfaces
+for interface in Wi-Fi Ethernet; do
+    if networksetup -listallhardwareports | grep -q "Hardware Port: $interface"; then
+        if ! networksetup -getdnsservers "$interface" 2>/dev/null | grep -q "$TAILSCALE_DNS"; then
+            log_action "Adding Tailscale DNS to $interface..."
+            # Get current DNS servers and prepend Tailscale DNS
+            CURRENT_DNS=$(networksetup -getdnsservers "$interface" 2>/dev/null | grep -v "^There aren't any" || echo "")
+            sudo networksetup -setdnsservers "$interface" $TAILSCALE_DNS $CURRENT_DNS
+        else
+            log_info "Tailscale DNS already configured for $interface."
+        fi
+    fi
+done
+
 # --- Configure tmux Service ---
 log_info "Setting up tmux service for user..."
 
