@@ -11,34 +11,40 @@ class TestProvisionSystem:
     """Tests for the main provisioning workflow."""
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
-    def test_provision_system_on_macos(self, mock_install_deps, mock_platform):
+    def test_provision_system_on_macos(self, mock_install_deps, mock_setup_ts, mock_platform):
         """Test provisioning workflow on macOS."""
         mock_platform.return_value = 'Darwin'
         
         provision_system(dry_run=False, user_only=False)
         
         mock_install_deps.assert_called_once_with(dry_run=False, user_only=False)
+        mock_setup_ts.assert_called_once_with(dry_run=False, user_only=False)
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
-    def test_provision_system_dry_run(self, mock_install_deps, mock_platform):
+    def test_provision_system_dry_run(self, mock_install_deps, mock_setup_ts, mock_platform):
         """Test provisioning workflow in dry-run mode."""
         mock_platform.return_value = 'Darwin'
         
         provision_system(dry_run=True, user_only=False)
         
         mock_install_deps.assert_called_once_with(dry_run=True, user_only=False)
+        mock_setup_ts.assert_called_once_with(dry_run=True, user_only=False)
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
-    def test_provision_system_user_only(self, mock_install_deps, mock_platform):
+    def test_provision_system_user_only(self, mock_install_deps, mock_setup_ts, mock_platform):
         """Test provisioning workflow in user-only mode."""
         mock_platform.return_value = 'Darwin'
         
         provision_system(dry_run=False, user_only=True)
         
         mock_install_deps.assert_called_once_with(dry_run=False, user_only=True)
+        mock_setup_ts.assert_called_once_with(dry_run=False, user_only=True)
     
     @patch('provision.steps.platform.system')
     def test_provision_system_unsupported_platform(self, mock_platform):
@@ -84,3 +90,43 @@ class TestInstallDependencies:
         mock_install_brew.assert_not_called()
         # But packages should still be installed
         mock_install_packages.assert_called_once()
+
+
+class TestTailscaleSetup:
+    """Tests for Tailscale setup phase."""
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_setup_tailscale_macos(self, mock_platform, mock_log_info):
+        """Test Tailscale setup on macOS."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.install_tailscale') as mock_install_ts, \
+             patch('provision.macos.install_tailscale_daemon') as mock_install_daemon, \
+             patch('provision.macos.configure_tailscale_dns') as mock_configure_dns:
+            
+            from provision.steps import setup_tailscale
+            setup_tailscale(dry_run=False, user_only=False)
+            
+            # Should call all Tailscale setup functions
+            mock_install_ts.assert_called_once_with(dry_run=False)
+            mock_install_daemon.assert_called_once_with(dry_run=False)
+            mock_configure_dns.assert_called_once_with(dry_run=False)
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_setup_tailscale_macos_user_only(self, mock_platform, mock_log_info):
+        """Test Tailscale setup in user-only mode (skips daemon)."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.install_tailscale') as mock_install_ts, \
+             patch('provision.macos.install_tailscale_daemon') as mock_install_daemon, \
+             patch('provision.macos.configure_tailscale_dns') as mock_configure_dns:
+            
+            from provision.steps import setup_tailscale
+            setup_tailscale(dry_run=False, user_only=True)
+            
+            # Should only install Tailscale, not daemon or DNS
+            mock_install_ts.assert_called_once_with(dry_run=False)
+            mock_install_daemon.assert_not_called()
+            mock_configure_dns.assert_not_called()

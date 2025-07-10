@@ -12,8 +12,8 @@
 - [x] Tailscale binary detection
 - [x] Tailscale version checking (compare with GitHub releases)
 - [x] Tailscale binary installation from source
-- [ ] Tailscale daemon configuration
-- [ ] DNS configuration for MagicDNS
+- [x] Tailscale daemon configuration
+- [x] DNS configuration for MagicDNS
 
 ## Phase 3: Service Configuration
 - [ ] tmux service setup

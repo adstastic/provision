@@ -241,3 +241,23 @@ sh.go("install", "package@version")  # Runs: go install package@version
 - Then mock specific commands: `mock_sh.go.return_value = "output"`
 - Use `@patch.dict` for os.environ: `@patch.dict('provision.macos.os.environ', {'PATH': '/usr/bin'})`
 - sh raises various ErrorReturnCode_X exceptions, catch with generic `Exception`
+
+### Learnings from Tailscale Setup Phase
+
+#### System Daemon Management
+- Use `Path.exists()` to check for LaunchDaemon plist files
+- The daemon plist path is `/Library/LaunchDaemons/com.tailscale.tailscaled.plist`
+- Install daemon with: `sudo tailscaled install-system-daemon`
+
+#### DNS Configuration on macOS
+- Use `networksetup` command for DNS management
+- List interfaces: `networksetup -listallhardwareports`
+- Get DNS servers: `networksetup -getdnsservers <interface>`
+- Set DNS servers: `sudo networksetup -setdnsservers <interface> <dns1> <dns2> ...`
+- Tailscale MagicDNS IP is `100.100.100.100`
+- Always prepend Tailscale DNS to existing DNS servers for fallback
+
+#### Testing Patterns for System Commands
+- When mocking `sh.networksetup` with `side_effect`, provide responses in order
+- Mock `sh.sudo.networksetup` separately from `sh.networksetup` for privileged commands
+- Use `call` from unittest.mock to verify complex command sequences

@@ -29,6 +29,29 @@ def install_dependencies(dry_run: bool = False, user_only: bool = False) -> None
         raise NotImplementedError(f"Platform {current_platform} is not supported yet")
 
 
+def setup_tailscale(dry_run: bool = False, user_only: bool = False) -> None:
+    """Setup Tailscale based on the platform."""
+    current_platform = platform.system()
+    
+    if current_platform == 'Darwin':
+        log_info("Setting up Tailscale for macOS...")
+        
+        # Install Tailscale binaries
+        from provision.macos import install_tailscale
+        install_tailscale(dry_run=dry_run)
+        
+        if not user_only:
+            # Install system daemon (requires root)
+            from provision.macos import install_tailscale_daemon
+            install_tailscale_daemon(dry_run=dry_run)
+            
+            # Configure DNS (requires root)
+            from provision.macos import configure_tailscale_dns
+            configure_tailscale_dns(dry_run=dry_run)
+    else:
+        raise NotImplementedError(f"Platform {current_platform} is not supported yet")
+
+
 def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     """Main provisioning workflow - delegates to platform-specific implementations."""
     current_platform = platform.system()
@@ -39,7 +62,9 @@ def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     # Phase 1: Install dependencies
     install_dependencies(dry_run=dry_run, user_only=user_only)
     
-    # TODO: Phase 2: Tailscale setup
+    # Phase 2: Tailscale setup
+    setup_tailscale(dry_run=dry_run, user_only=user_only)
+    
     # TODO: Phase 3: Service configuration
     # TODO: Phase 4: Security configuration
     # TODO: Phase 5: System configuration

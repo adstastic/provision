@@ -115,3 +115,71 @@ def get_tailscaled_path() -> Optional[str]:
         return str(sh.which("tailscaled")).strip()
     except Exception:  # sh raises various ErrorReturnCode_X exceptions
         return None
+
+
+def install_tailscale_daemon(dry_run: bool = False) -> None:
+    """Install Tailscale as a system daemon."""
+    daemon_plist = Path("/Library/LaunchDaemons/com.tailscale.tailscaled.plist")
+    
+    if daemon_plist.exists():
+        log_info("Tailscale system daemon is already installed.")
+        return
+    
+    if dry_run:
+        log_action("[DRY RUN] Would install Tailscale system daemon")
+        return
+    
+    # Get tailscaled path
+    tailscaled_path = get_tailscaled_path()
+    if not tailscaled_path:
+        raise RuntimeError("tailscaled binary not found")
+    
+    log_action("Tailscale system daemon not found. Installing...")
+    sh.sudo(tailscaled_path, "install-system-daemon")
+
+
+def configure_tailscale_dns(dry_run: bool = False) -> None:
+    """Configure system to use Tailscale MagicDNS."""
+    TAILSCALE_DNS = "100.100.100.100"
+    
+    # Get list of network interfaces
+    hardware_ports = str(sh.networksetup("-listallhardwareports"))
+    
+    # Common network interfaces to configure
+    interfaces = ["Wi-Fi", "Ethernet"]
+    
+    for interface in interfaces:
+        if f"Hardware Port: {interface}" not in hardware_ports:
+            continue
+            
+        try:
+            # Get current DNS servers
+            current_dns = str(sh.networksetup("-getdnsservers", interface))
+            
+            # Check if Tailscale DNS is already configured
+            if TAILSCALE_DNS in current_dns:
+                log_info(f"Tailscale DNS already configured for {interface}.")
+                continue
+            
+            if dry_run:
+                log_action(f"[DRY RUN] Would configure Tailscale DNS for {interface}")
+                continue
+            
+            # Get current DNS servers again for the actual configuration
+            current_dns_list = []
+            try:
+                dns_output = str(sh.networksetup("-getdnsservers", interface))
+                if "There aren't any" not in dns_output and dns_output.strip():
+                    current_dns_list = dns_output.strip().split('\n')
+            except Exception:
+                pass
+            
+            # Prepend Tailscale DNS to existing DNS servers
+            new_dns_list = [TAILSCALE_DNS] + current_dns_list
+            
+            log_action(f"Adding Tailscale DNS to {interface}...")
+            sh.sudo.networksetup("-setdnsservers", interface, *new_dns_list)
+            
+        except Exception as e:
+            # Interface might not exist or be configured
+            continue

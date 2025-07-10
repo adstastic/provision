@@ -312,3 +312,146 @@ class TestTailscaleInstallation:
             path = get_tailscaled_path()
             
             assert path is None
+
+
+class TestTailscaleDaemon:
+    """Tests for Tailscale daemon installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.Path')
+    @patch('provision.macos.sh.sudo')
+    def test_install_tailscale_daemon_success(self, mock_sudo, mock_path_class, mock_get_path, 
+                                            mock_log_info, mock_log_action):
+        """Test installing Tailscale daemon when not installed."""
+        # Mock path check for daemon plist
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = False
+        mock_path_class.return_value = mock_path_instance
+        
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        from provision.macos import install_tailscale_daemon
+        install_tailscale_daemon(dry_run=False)
+        
+        mock_path_class.assert_called_with("/Library/LaunchDaemons/com.tailscale.tailscaled.plist")
+        mock_log_action.assert_called_with("Tailscale system daemon not found. Installing...")
+        mock_sudo.assert_called_once_with("/opt/homebrew/bin/tailscaled", "install-system-daemon")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.Path')
+    def test_install_tailscale_daemon_already_installed(self, mock_path_class, mock_log_info):
+        """Test daemon installation when already installed (idempotency)."""
+        # Mock path check - daemon already exists
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = True
+        mock_path_class.return_value = mock_path_instance
+        
+        from provision.macos import install_tailscale_daemon
+        install_tailscale_daemon(dry_run=False)
+        
+        mock_log_info.assert_called_with("Tailscale system daemon is already installed.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.Path')
+    def test_install_tailscale_daemon_dry_run(self, mock_path_class, mock_log_action):
+        """Test daemon installation in dry-run mode."""
+        # Mock path check - daemon not installed
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = False
+        mock_path_class.return_value = mock_path_instance
+        
+        from provision.macos import install_tailscale_daemon
+        install_tailscale_daemon(dry_run=True)
+        
+        mock_log_action.assert_called_with("[DRY RUN] Would install Tailscale system daemon")
+    
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.Path')
+    def test_install_tailscale_daemon_without_binary(self, mock_path_class, mock_get_path):
+        """Test daemon installation when tailscaled binary not found."""
+        # Mock path check - daemon not installed
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = False
+        mock_path_class.return_value = mock_path_instance
+        
+        # Mock no tailscaled binary
+        mock_get_path.return_value = None
+        
+        from provision.macos import install_tailscale_daemon
+        with pytest.raises(RuntimeError, match="tailscaled binary not found"):
+            install_tailscale_daemon(dry_run=False)
+
+
+class TestTailscaleDNS:
+    """Tests for Tailscale DNS configuration."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    @patch('provision.macos.sh.networksetup')
+    def test_configure_tailscale_dns_success(self, mock_networksetup, mock_sudo, 
+                                           mock_log_info, mock_log_action):
+        """Test configuring Tailscale DNS when not configured."""
+        # Mock listing network interfaces
+        mock_networksetup.side_effect = [
+            "Hardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: Ethernet\nDevice: en1",  # listallhardwareports
+            "8.8.8.8\n8.8.4.4",  # getdnsservers Wi-Fi (no Tailscale DNS)
+            "8.8.8.8\n8.8.4.4",  # getdnsservers Wi-Fi again for getting current
+            "Empty",  # getdnsservers Ethernet (no DNS configured)
+            ""  # getdnsservers Ethernet again for getting current
+        ]
+        
+        from provision.macos import configure_tailscale_dns
+        configure_tailscale_dns(dry_run=False)
+        
+        # Should configure DNS for both interfaces
+        expected_calls = [
+            call("-listallhardwareports"),
+            call("-getdnsservers", "Wi-Fi"),
+            call("-getdnsservers", "Wi-Fi"),
+            call("-getdnsservers", "Ethernet"),
+            call("-getdnsservers", "Ethernet")
+        ]
+        mock_networksetup.assert_has_calls(expected_calls)
+        
+        # Should set DNS with Tailscale DNS first
+        expected_sudo_calls = [
+            call.networksetup("-setdnsservers", "Wi-Fi", "100.100.100.100", "8.8.8.8", "8.8.4.4"),
+            call.networksetup("-setdnsservers", "Ethernet", "100.100.100.100")
+        ]
+        mock_sudo.assert_has_calls(expected_sudo_calls)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.networksetup')
+    def test_configure_tailscale_dns_already_configured(self, mock_networksetup, mock_log_info):
+        """Test DNS configuration when already configured (idempotency)."""
+        # Mock listing network interfaces and DNS already has Tailscale
+        mock_networksetup.side_effect = [
+            "Hardware Port: Wi-Fi\nDevice: en0",  # listallhardwareports
+            "100.100.100.100\n8.8.8.8"  # getdnsservers - already has Tailscale DNS
+        ]
+        
+        from provision.macos import configure_tailscale_dns
+        configure_tailscale_dns(dry_run=False)
+        
+        # Should detect DNS is already configured
+        assert any("already configured" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.networksetup')
+    def test_configure_tailscale_dns_dry_run(self, mock_networksetup, mock_log_action):
+        """Test DNS configuration in dry-run mode."""
+        # Mock listing network interfaces
+        mock_networksetup.side_effect = [
+            "Hardware Port: Wi-Fi\nDevice: en0",  # listallhardwareports
+            "8.8.8.8"  # getdnsservers - no Tailscale DNS
+        ]
+        
+        from provision.macos import configure_tailscale_dns
+        configure_tailscale_dns(dry_run=True)
+        
+        # Should show dry-run message
+        assert any("[DRY RUN]" in str(call) for call in mock_log_action.call_args_list)
