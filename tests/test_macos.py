@@ -1,0 +1,1215 @@
+"""Tests for macOS-specific provisioning functions."""
+import pytest
+from unittest.mock import patch, MagicMock, call
+import sh
+from pathlib import Path
+
+from provision.macos import (
+    check_homebrew, install_homebrew, install_brewfile_packages,
+    check_tailscale, get_installed_tailscale_version, get_latest_tailscale_version,
+    is_tailscale_up_to_date, install_tailscale, get_tailscaled_path
+)
+
+
+class TestHomebrewCheck:
+    """Tests for Homebrew detection."""
+    
+    @patch('provision.macos.command_exists')
+    def test_check_homebrew_installed(self, mock_command_exists):
+        """Test detecting when Homebrew is installed."""
+        mock_command_exists.return_value = True
+        
+        result = check_homebrew()
+        
+        assert result is True
+        mock_command_exists.assert_called_once_with('brew')
+    
+    @patch('provision.macos.command_exists')
+    def test_check_homebrew_not_installed(self, mock_command_exists):
+        """Test detecting when Homebrew is not installed."""
+        mock_command_exists.return_value = False
+        
+        result = check_homebrew()
+        
+        assert result is False
+        mock_command_exists.assert_called_once_with('brew')
+
+
+class TestHomebrewInstallation:
+    """Tests for Homebrew installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.bash')
+    @patch('provision.macos.sh.curl')
+    @patch('provision.macos.check_homebrew')
+    def test_install_homebrew_when_not_installed(self, mock_check, mock_curl, mock_bash, mock_log_info, mock_log_action):
+        """Test installing Homebrew when it's not installed."""
+        mock_check.return_value = False
+        mock_curl.return_value = "install script content"
+        
+        install_homebrew(dry_run=False)
+        
+        mock_check.assert_called_once()
+        mock_log_action.assert_called_with("Homebrew not found. Installing Homebrew...")
+        mock_curl.assert_called_once_with("-fsSL", "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh")
+        mock_bash.assert_called_once_with("-c", "install script content")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.check_homebrew')
+    def test_install_homebrew_when_already_installed(self, mock_check, mock_log_info):
+        """Test installing Homebrew when it's already installed (idempotent)."""
+        mock_check.return_value = True
+        
+        install_homebrew(dry_run=False)
+        
+        mock_check.assert_called_once()
+        mock_log_info.assert_called_with("Homebrew is already installed.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.check_homebrew')
+    def test_install_homebrew_dry_run(self, mock_check, mock_log_action):
+        """Test installing Homebrew in dry-run mode."""
+        mock_check.return_value = False
+        
+        install_homebrew(dry_run=True)
+        
+        mock_check.assert_called_once()
+        mock_log_action.assert_called_with("[DRY RUN] Would install Homebrew")
+
+
+class TestBrewfileInstallation:
+    """Tests for Brewfile package installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.brew')
+    def test_install_brewfile_packages(self, mock_brew, mock_log_action):
+        """Test installing packages from Brewfile."""
+        brewfile_path = "/path/to/Brewfile"
+        
+        install_brewfile_packages(brewfile_path, dry_run=False)
+        
+        mock_log_action.assert_called_with("Installing packages from Brewfile...")
+        mock_brew.assert_called_once_with("bundle", f"--file={brewfile_path}")
+    
+    @patch('provision.macos.log_action')
+    def test_install_brewfile_packages_dry_run(self, mock_log_action):
+        """Test installing packages in dry-run mode."""
+        brewfile_path = "/path/to/Brewfile"
+        
+        install_brewfile_packages(brewfile_path, dry_run=True)
+        
+        mock_log_action.assert_called_with(f"[DRY RUN] Would install packages from {brewfile_path}")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.brew')
+    def test_install_brewfile_packages_with_path_object(self, mock_brew, mock_log_action):
+        """Test installing packages with Path object."""
+        brewfile_path = Path("/path/to/Brewfile")
+        
+        install_brewfile_packages(brewfile_path, dry_run=False)
+        
+        mock_log_action.assert_called_with("Installing packages from Brewfile...")
+        mock_brew.assert_called_once_with("bundle", f"--file={brewfile_path}")
+
+
+class TestTailscaleCheck:
+    """Tests for Tailscale detection."""
+    
+    @patch('provision.macos.command_exists')
+    def test_check_tailscale_installed(self, mock_command_exists):
+        """Test detecting when Tailscale is installed."""
+        mock_command_exists.return_value = True
+        
+        result = check_tailscale()
+        
+        assert result is True
+        mock_command_exists.assert_called_once_with('tailscaled')
+    
+    @patch('provision.macos.command_exists')
+    def test_check_tailscale_not_installed(self, mock_command_exists):
+        """Test detecting when Tailscale is not installed."""
+        mock_command_exists.return_value = False
+        
+        result = check_tailscale()
+        
+        assert result is False
+        mock_command_exists.assert_called_once_with('tailscaled')
+
+
+class TestTailscaleVersion:
+    """Tests for Tailscale version checking."""
+    
+    @patch('provision.macos.sh.tailscale')
+    def test_get_installed_tailscale_version(self, mock_tailscale):
+        """Test getting the installed Tailscale version."""
+        mock_tailscale.return_value = "  tailscale commit: 1234567890abcdef\n  other/third/v1.58.2-t1234567890a\n  go version: go1.21.1\n"
+        
+        version = get_installed_tailscale_version()
+        
+        assert version == "1.58.2"
+        mock_tailscale.assert_called_once_with("version")
+    
+    @patch('provision.macos.sh.tailscale')
+    def test_get_installed_tailscale_version_not_found(self, mock_tailscale):
+        """Test getting version when tailscale command fails."""
+        mock_tailscale.side_effect = sh.ErrorReturnCode_1("tailscale", b"", b"command not found")
+        
+        version = get_installed_tailscale_version()
+        
+        assert version is None
+    
+    @patch('provision.macos.sh.curl')
+    def test_get_latest_tailscale_version(self, mock_curl):
+        """Test getting the latest Tailscale version from GitHub."""
+        mock_response = '{"tag_name": "v1.60.0", "name": "v1.60.0"}'
+        mock_curl.return_value = mock_response
+        
+        version = get_latest_tailscale_version()
+        
+        assert version == "1.60.0"
+        mock_curl.assert_called_once_with(
+            "-s",
+            "https://api.github.com/repos/tailscale/tailscale/releases/latest"
+        )
+    
+    @patch('provision.macos.sh.curl')
+    def test_get_latest_tailscale_version_error(self, mock_curl):
+        """Test handling errors when fetching latest version."""
+        mock_curl.side_effect = sh.ErrorReturnCode_1("curl", b"", b"network error")
+        
+        version = get_latest_tailscale_version()
+        
+        assert version is None
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_true(self, mock_installed, mock_latest):
+        """Test when Tailscale is up to date."""
+        mock_installed.return_value = "1.60.0"
+        mock_latest.return_value = "1.60.0"
+        
+        result = is_tailscale_up_to_date()
+        
+        assert result is True
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_false(self, mock_installed, mock_latest):
+        """Test when Tailscale is outdated."""
+        mock_installed.return_value = "1.58.2"
+        mock_latest.return_value = "1.60.0"
+        
+        result = is_tailscale_up_to_date()
+        
+        assert result is False
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_not_installed(self, mock_installed, mock_latest):
+        """Test when Tailscale is not installed."""
+        mock_installed.return_value = None
+        mock_latest.return_value = "1.60.0"
+        
+        result = is_tailscale_up_to_date()
+        
+        assert result is False
+    
+    @patch('provision.macos.get_latest_tailscale_version')
+    @patch('provision.macos.get_installed_tailscale_version')
+    def test_is_tailscale_up_to_date_cannot_check(self, mock_installed, mock_latest):
+        """Test when we cannot determine the latest version."""
+        mock_installed.return_value = "1.58.2"
+        mock_latest.return_value = None
+        
+        result = is_tailscale_up_to_date()
+        
+        # If we can't get the latest version, assume current is up to date
+        assert result is True
+
+
+class TestTailscaleInstallation:
+    """Tests for Tailscale installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch.dict('provision.macos.os.environ', {'PATH': '/usr/bin:/bin'})
+    @patch('provision.macos.is_tailscale_up_to_date')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_not_installed(self, mock_check, mock_up_to_date, mock_log_info, mock_log_action):
+        """Test installing Tailscale when not installed."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_check.return_value = False
+            mock_sh.go.return_value = "/home/user/go"  # Mock go env GOPATH output
+            
+            install_tailscale(dry_run=False)
+            
+            mock_check.assert_called_once()
+            mock_log_action.assert_called_with("tailscaled not found. Installing Tailscale from source...")
+            # Check go env GOPATH was called
+            mock_sh.go.assert_any_call("env", "GOPATH")
+            # Check go install was called
+            mock_sh.go.assert_any_call("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.is_tailscale_up_to_date')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_already_up_to_date(self, mock_check, mock_up_to_date, mock_log_info):
+        """Test installing Tailscale when already up to date."""
+        mock_check.return_value = True
+        mock_up_to_date.return_value = True
+        
+        install_tailscale(dry_run=False)
+        
+        mock_check.assert_called_once()
+        mock_up_to_date.assert_called_once()
+        mock_log_info.assert_called_with("Tailscale is already installed and up to date.")
+    
+    @patch('provision.macos.log_action')
+    @patch.dict('provision.macos.os.environ', {'PATH': '/usr/bin:/bin'})
+    @patch('provision.macos.is_tailscale_up_to_date')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_needs_update(self, mock_check, mock_up_to_date, mock_log_action):
+        """Test updating Tailscale when outdated."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_check.return_value = True
+            mock_up_to_date.return_value = False
+            mock_sh.go.return_value = "/home/user/go"
+            
+            install_tailscale(dry_run=False)
+            
+            mock_check.assert_called_once()
+            mock_up_to_date.assert_called_once()
+            mock_log_action.assert_called_with("Tailscale is outdated. Updating from source...")
+            mock_sh.go.assert_any_call("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.check_tailscale')
+    def test_install_tailscale_dry_run(self, mock_check, mock_log_action):
+        """Test installing Tailscale in dry-run mode."""
+        mock_check.return_value = False
+        
+        install_tailscale(dry_run=True)
+        
+        mock_check.assert_called_once()
+        mock_log_action.assert_called_with("[DRY RUN] Would install Tailscale from source")
+    
+    def test_get_tailscaled_path(self):
+        """Test getting the tailscaled binary path."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_sh.which.return_value = "/usr/local/bin/tailscaled"
+            
+            path = get_tailscaled_path()
+            
+            assert path == "/usr/local/bin/tailscaled"
+            mock_sh.which.assert_called_once_with("tailscaled")
+    
+    def test_get_tailscaled_path_not_found(self):
+        """Test getting tailscaled path when not found."""
+        with patch('provision.macos.sh') as mock_sh:
+            mock_sh.which.side_effect = sh.ErrorReturnCode_1("which", b"", b"tailscaled not found")
+            
+            path = get_tailscaled_path()
+            
+            assert path is None
+
+
+class TestTailscaleDaemon:
+    """Tests for Tailscale daemon installation."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.Path')
+    @patch('provision.macos.sh.sudo')
+    def test_install_tailscale_daemon_success(self, mock_sudo, mock_path_class, mock_get_path, 
+                                            mock_log_info, mock_log_action):
+        """Test installing Tailscale daemon when not installed."""
+        # Mock path check for daemon plist
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = False
+        mock_path_class.return_value = mock_path_instance
+        
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        from provision.macos import install_tailscale_daemon
+        install_tailscale_daemon(dry_run=False)
+        
+        mock_path_class.assert_called_with("/Library/LaunchDaemons/com.tailscale.tailscaled.plist")
+        mock_log_action.assert_called_with("Tailscale system daemon not found. Installing...")
+        mock_sudo.assert_called_once_with("/opt/homebrew/bin/tailscaled", "install-system-daemon")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.Path')
+    def test_install_tailscale_daemon_already_installed(self, mock_path_class, mock_log_info):
+        """Test daemon installation when already installed (idempotency)."""
+        # Mock path check - daemon already exists
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = True
+        mock_path_class.return_value = mock_path_instance
+        
+        from provision.macos import install_tailscale_daemon
+        install_tailscale_daemon(dry_run=False)
+        
+        mock_log_info.assert_called_with("Tailscale system daemon is already installed.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.Path')
+    def test_install_tailscale_daemon_dry_run(self, mock_path_class, mock_log_action):
+        """Test daemon installation in dry-run mode."""
+        # Mock path check - daemon not installed
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = False
+        mock_path_class.return_value = mock_path_instance
+        
+        from provision.macos import install_tailscale_daemon
+        install_tailscale_daemon(dry_run=True)
+        
+        mock_log_action.assert_called_with("[DRY RUN] Would install Tailscale system daemon")
+    
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.Path')
+    def test_install_tailscale_daemon_without_binary(self, mock_path_class, mock_get_path):
+        """Test daemon installation when tailscaled binary not found."""
+        # Mock path check - daemon not installed
+        mock_path_instance = MagicMock()
+        mock_path_instance.exists.return_value = False
+        mock_path_class.return_value = mock_path_instance
+        
+        # Mock no tailscaled binary
+        mock_get_path.return_value = None
+        
+        from provision.macos import install_tailscale_daemon
+        with pytest.raises(RuntimeError, match="tailscaled binary not found"):
+            install_tailscale_daemon(dry_run=False)
+
+
+class TestTailscaleDNS:
+    """Tests for Tailscale DNS configuration."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    @patch('provision.macos.sh.networksetup')
+    def test_configure_tailscale_dns_success(self, mock_networksetup, mock_sudo, 
+                                           mock_log_info, mock_log_action):
+        """Test configuring Tailscale DNS when not configured."""
+        # Mock listing network interfaces
+        mock_networksetup.side_effect = [
+            "Hardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: Ethernet\nDevice: en1",  # listallhardwareports
+            "8.8.8.8\n8.8.4.4",  # getdnsservers Wi-Fi (no Tailscale DNS)
+            "8.8.8.8\n8.8.4.4",  # getdnsservers Wi-Fi again for getting current
+            "Empty",  # getdnsservers Ethernet (no DNS configured)
+            ""  # getdnsservers Ethernet again for getting current
+        ]
+        
+        from provision.macos import configure_tailscale_dns
+        configure_tailscale_dns(dry_run=False)
+        
+        # Should configure DNS for both interfaces
+        expected_calls = [
+            call("-listallhardwareports"),
+            call("-getdnsservers", "Wi-Fi"),
+            call("-getdnsservers", "Wi-Fi"),
+            call("-getdnsservers", "Ethernet"),
+            call("-getdnsservers", "Ethernet")
+        ]
+        mock_networksetup.assert_has_calls(expected_calls)
+        
+        # Should set DNS with Tailscale DNS first
+        expected_sudo_calls = [
+            call.networksetup("-setdnsservers", "Wi-Fi", "100.100.100.100", "8.8.8.8", "8.8.4.4"),
+            call.networksetup("-setdnsservers", "Ethernet", "100.100.100.100")
+        ]
+        mock_sudo.assert_has_calls(expected_sudo_calls)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.networksetup')
+    def test_configure_tailscale_dns_already_configured(self, mock_networksetup, mock_log_info):
+        """Test DNS configuration when already configured (idempotency)."""
+        # Mock listing network interfaces and DNS already has Tailscale
+        mock_networksetup.side_effect = [
+            "Hardware Port: Wi-Fi\nDevice: en0",  # listallhardwareports
+            "100.100.100.100\n8.8.8.8"  # getdnsservers - already has Tailscale DNS
+        ]
+        
+        from provision.macos import configure_tailscale_dns
+        configure_tailscale_dns(dry_run=False)
+        
+        # Should detect DNS is already configured
+        assert any("already configured" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.networksetup')
+    def test_configure_tailscale_dns_dry_run(self, mock_networksetup, mock_log_action):
+        """Test DNS configuration in dry-run mode."""
+        # Mock listing network interfaces
+        mock_networksetup.side_effect = [
+            "Hardware Port: Wi-Fi\nDevice: en0",  # listallhardwareports
+            "8.8.8.8"  # getdnsservers - no Tailscale DNS
+        ]
+        
+        from provision.macos import configure_tailscale_dns
+        configure_tailscale_dns(dry_run=True)
+        
+        # Should show dry-run message
+        assert any("[DRY RUN]" in str(call) for call in mock_log_action.call_args_list)
+
+
+class TestTmuxService:
+    """Tests for tmux service setup."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.sh.sudo')
+    @patch('provision.macos.sh.launchctl')
+    @patch('provision.macos.sh.which')
+    @patch('builtins.open', create=True)
+    @patch.object(Path, 'exists')
+    def test_setup_tmux_service_success(self, mock_exists, mock_open, mock_which, 
+                                       mock_launchctl, mock_sudo, mock_get_home,
+                                       mock_get_user, mock_log_info, mock_log_action):
+        """Test setting up tmux service when not configured."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        # Mock tmux binary path
+        mock_which.return_value = "/opt/homebrew/bin/tmux"
+        
+        # Mock path exists checks: LaunchAgents dir exists, plist doesn't
+        mock_exists.side_effect = [True, False]
+        
+        # Mock file operations
+        mock_file = MagicMock()
+        mock_file.read.return_value = "<?xml version=\"1.0\"?>\n<plist><string>TMUX_PATH_PLACEHOLDER</string></plist>"
+        mock_file.__enter__.return_value = mock_file
+        mock_file.__exit__.return_value = None
+        mock_open.return_value = mock_file
+        
+        # Mock launchctl list
+        mock_launchctl.list.return_value = "com.apple.Finder\ncom.apple.Dock"  # tmux not in list
+        
+        from provision.macos import setup_tmux_service
+        setup_tmux_service(dry_run=False)
+        
+        # Should create plist file and load service
+        mock_log_action.assert_any_call("Creating tmux service plist...")
+        # Verify launchctl load was called
+        assert any(call for call in mock_sudo.call_args_list 
+                  if len(call[0]) >= 4 and call[0][2] == "launchctl" and call[0][3] == "load")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.sh.launchctl')
+    @patch.object(Path, 'exists')
+    def test_setup_tmux_service_already_exists(self, mock_exists, mock_launchctl,
+                                              mock_get_home, mock_get_user, mock_log_info):
+        """Test tmux service setup when already configured (idempotency)."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        # Mock paths - both LaunchAgents dir and plist exist
+        mock_exists.side_effect = [True, True]
+        
+        # Mock launchctl list - tmux already loaded
+        mock_launchctl.list.return_value = "com.tmux.main\ncom.apple.Finder"
+        
+        from provision.macos import setup_tmux_service
+        setup_tmux_service(dry_run=False)
+        
+        # Should detect service is already configured
+        assert any("already" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    def test_setup_tmux_service_dry_run(self, mock_get_home, mock_get_user, mock_log_action):
+        """Test tmux service setup in dry-run mode."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        from provision.macos import setup_tmux_service
+        setup_tmux_service(dry_run=True)
+        
+        # Should show dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would setup tmux service")
+    
+    @patch('provision.utils.get_real_user')
+    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.sh.which')
+    def test_setup_tmux_service_no_tmux_binary(self, mock_which, mock_get_home, mock_get_user):
+        """Test tmux service setup when tmux binary not found."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        mock_get_home.return_value = "/Users/testuser"
+        
+        # Mock no tmux binary
+        mock_which.side_effect = Exception("Command not found")
+        
+        from provision.macos import setup_tmux_service
+        with pytest.raises(RuntimeError, match="tmux binary not found"):
+            setup_tmux_service(dry_run=False)
+
+
+class TestColimaService:
+    """Tests for Colima service setup."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.sh.brew')
+    @patch('provision.macos.sh.colima')
+    @patch('time.sleep')
+    def test_setup_colima_service_success(self, mock_sleep, mock_colima, mock_brew, mock_get_user,
+                                         mock_log_info, mock_log_action):
+        """Test setting up Colima service when not running."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        # Mock brew services list - colima not started
+        mock_services = MagicMock()
+        mock_services.list.return_value = "redis       started\npostgresql  stopped\ncolima      stopped"
+        mock_services.start.return_value = None
+        mock_brew.services = mock_services
+        
+        # Mock colima status after start
+        mock_colima.status.return_value = "Colima is running"
+        
+        from provision.macos import setup_colima_service
+        setup_colima_service(dry_run=False)
+        
+        # Should start Colima service
+        mock_log_action.assert_any_call("Starting Colima service via Homebrew services...")
+        mock_services.start.assert_called_once_with("colima")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.sh.brew')
+    def test_setup_colima_service_already_running(self, mock_brew, mock_get_user, mock_log_info):
+        """Test Colima service setup when already running (idempotency)."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        # Mock brew services list - colima already started
+        mock_services = MagicMock()
+        mock_services.list.return_value = "redis       started\ncolima      started"
+        mock_brew.services = mock_services
+        
+        from provision.macos import setup_colima_service
+        setup_colima_service(dry_run=False)
+        
+        # Should detect service is already running
+        mock_log_info.assert_called_with("Colima service is already running.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.utils.get_real_user')
+    def test_setup_colima_service_dry_run(self, mock_get_user, mock_log_action):
+        """Test Colima service setup in dry-run mode."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        from provision.macos import setup_colima_service
+        setup_colima_service(dry_run=True)
+        
+        # Should show dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would setup Colima service")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.command_exists')
+    @patch('provision.macos.os.environ.get')
+    @patch('provision.macos.sh.brew')
+    @patch('time.sleep')
+    def test_setup_colima_with_reattach_dependency(self, mock_sleep, mock_brew, mock_env_get,
+                                                   mock_command_exists, mock_get_user, mock_log_action):
+        """Test Colima setup installs reattach-to-user-namespace when in tmux."""
+        # Mock user info
+        mock_get_user.return_value = "testuser"
+        
+        # Mock being in tmux
+        mock_env_get.return_value = "/tmp/tmux-501/default"  # TMUX env var set
+        
+        # Mock reattach-to-user-namespace not installed
+        mock_command_exists.return_value = False
+        
+        # Mock brew services list - colima not started
+        mock_services = MagicMock()
+        mock_services.list.return_value = "colima      stopped"
+        mock_services.start.return_value = None
+        mock_brew.services = mock_services
+        
+        # Mock colima status check
+        with patch('provision.macos.sh') as mock_sh:
+            # Copy the original brew mock to the patched sh
+            mock_sh.brew = mock_brew
+            mock_sh.colima.status.return_value = "Colima is running"
+            
+            from provision.macos import setup_colima_service
+            setup_colima_service(dry_run=False)
+        
+        # Should install reattach-to-user-namespace
+        mock_log_action.assert_any_call("Installing reattach-to-user-namespace for tmux compatibility...")
+        mock_brew.assert_called_once_with("install", "reattach-to-user-namespace")
+
+
+class TestFileVaultManagement:
+    """Tests for FileVault management."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_when_enabled(self, mock_sudo, mock_log_info, mock_log_action):
+        """Test disabling FileVault when it's enabled."""
+        # Mock fdesetup status showing FileVault is on
+        mock_sudo.fdesetup.return_value = "FileVault is On."
+        
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=False)
+        
+        # Should check status and disable
+        mock_sudo.fdesetup.assert_any_call("status")
+        mock_log_action.assert_called_with("FileVault is enabled. Disabling for headless boot...")
+        mock_sudo.fdesetup.assert_any_call("disable")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_already_disabled(self, mock_sudo, mock_log_info):
+        """Test FileVault management when already disabled (idempotency)."""
+        # Mock fdesetup status showing FileVault is off
+        mock_sudo.fdesetup.return_value = "FileVault is Off."
+        
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=False)
+        
+        # Should only check status, not disable
+        mock_sudo.fdesetup.assert_called_once_with("status")
+        mock_log_info.assert_called_with("FileVault is already disabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_dry_run(self, mock_sudo, mock_log_action):
+        """Test FileVault management in dry-run mode."""
+        # Mock fdesetup status showing FileVault is on
+        mock_sudo.fdesetup.return_value = "FileVault is On."
+        
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=True)
+        
+        # Should check status but not disable
+        mock_sudo.fdesetup.assert_called_once_with("status")
+        mock_log_action.assert_called_with("[DRY RUN] Would disable FileVault")
+
+
+class TestSSHManagement:
+    """Tests for SSH (Remote Login) management."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_disable_ssh_when_enabled(self, mock_sudo, mock_log_info, mock_log_action):
+        """Test disabling SSH when it's enabled."""
+        # Mock systemsetup showing Remote Login is on
+        mock_sudo.systemsetup.return_value = "Remote Login: On"
+        
+        from provision.macos import disable_ssh
+        disable_ssh(dry_run=False)
+        
+        # Should check status and disable
+        mock_sudo.systemsetup.assert_any_call("-getremotelogin")
+        mock_log_action.assert_called_with("Standard SSH (Remote Login) is enabled. Disabling...")
+        mock_sudo.systemsetup.assert_any_call("-setremotelogin", "off")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_disable_ssh_already_disabled(self, mock_sudo, mock_log_info):
+        """Test SSH management when already disabled (idempotency)."""
+        # Mock systemsetup showing Remote Login is off
+        mock_sudo.systemsetup.return_value = "Remote Login: Off"
+        
+        from provision.macos import disable_ssh
+        disable_ssh(dry_run=False)
+        
+        # Should only check status, not disable
+        mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
+        mock_log_info.assert_called_with("Standard SSH (Remote Login) is already disabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.sudo')
+    def test_disable_ssh_dry_run(self, mock_sudo, mock_log_action):
+        """Test SSH disabling in dry-run mode."""
+        # Mock systemsetup showing Remote Login is on
+        mock_sudo.systemsetup.return_value = "Remote Login: On"
+        
+        from provision.macos import disable_ssh
+        disable_ssh(dry_run=True)
+        
+        # Should check status but not disable
+        mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
+        mock_log_action.assert_called_with("[DRY RUN] Would disable SSH (Remote Login)")
+
+
+class TestFirewallConfiguration:
+    """Tests for Firewall configuration."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_when_disabled(self, mock_sudo, mock_get_path, 
+                                            mock_log_info, mock_log_action):
+        """Test enabling and configuring firewall when disabled."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.side_effect = [
+            "Firewall is disabled.",  # getglobalstate
+            "",  # setglobalstate
+            "",  # setallowsigned
+            "",  # setstealthmode
+            "Applications:",  # listapps (empty list)
+            "",  # add tailscaled
+            "",  # unblockapp tailscaled
+            "Applications:",  # listapps (empty list)
+            "",  # add ARDAgent
+            "",  # unblockapp ARDAgent
+        ]
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=False)
+        
+        # Should enable firewall with all settings
+        expected_calls = [
+            call("--getglobalstate"),
+            call("--setglobalstate", "on"),
+            call("--setallowsigned", "on"),
+            call("--setstealthmode", "on"),
+        ]
+        # Verify first 4 calls for firewall enablement
+        actual_calls = mock_socketfilter.call_args_list[:4]
+        assert actual_calls == expected_calls
+        
+        mock_log_action.assert_any_call("Firewall is disabled. Enabling firewall...")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_already_enabled(self, mock_sudo, mock_get_path, mock_log_info):
+        """Test firewall configuration when already enabled (idempotency)."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.side_effect = [
+            "Firewall is enabled.",  # getglobalstate
+            f"Applications:\n/opt/homebrew/bin/tailscaled",  # listapps with tailscaled
+            "",  # unblockapp tailscaled
+            f"Applications:\n/System/Library/CoreServices/RemoteManagement/ARDAgent.app",  # listapps with ARDAgent
+            "",  # unblockapp ARDAgent
+        ]
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=False)
+        
+        # Should detect firewall is enabled
+        mock_log_info.assert_any_call("Firewall is already enabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_dry_run(self, mock_sudo, mock_get_path, mock_log_action):
+        """Test firewall configuration in dry-run mode."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.return_value = "Firewall is disabled."
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=True)
+        
+        # Should show dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would enable and configure firewall")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.get_tailscaled_path')
+    @patch('provision.macos.sh.sudo')
+    def test_configure_firewall_adds_missing_exceptions(self, mock_sudo, mock_get_path, mock_log_action):
+        """Test that firewall adds only missing exceptions."""
+        # Mock tailscaled path
+        mock_get_path.return_value = "/opt/homebrew/bin/tailscaled"
+        
+        # Create a mock for the socketfilterfw command
+        mock_socketfilter = MagicMock()
+        mock_socketfilter.side_effect = [
+            "Firewall is enabled.",  # getglobalstate
+            "Applications:\n/some/other/app",  # listapps without tailscaled
+            "",  # add tailscaled
+            "",  # unblockapp tailscaled
+            f"Applications:\n/System/Library/CoreServices/RemoteManagement/ARDAgent.app",  # listapps with ARDAgent
+            "",  # unblockapp ARDAgent (always called)
+        ]
+        
+        # Set the socketfilterfw command on sudo
+        setattr(mock_sudo, '/usr/libexec/ApplicationFirewall/socketfilterfw', mock_socketfilter)
+        
+        from provision.macos import configure_firewall
+        configure_firewall(dry_run=False)
+        
+        # Should add missing exception
+        mock_log_action.assert_any_call("Adding firewall exception for: /opt/homebrew/bin/tailscaled")
+
+
+class TestScreenSharingSetup:
+    """Tests for Screen Sharing setup."""
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_screen_sharing_when_not_enabled(self, mock_sudo, mock_log_info):
+        """Test enabling Screen Sharing when it's not enabled."""
+        # Mock launchctl list showing screen sharing is not loaded
+        mock_sudo.launchctl.list.return_value = "com.apple.someservice\ncom.apple.otherservice"
+        
+        from provision.macos import enable_screen_sharing
+        enable_screen_sharing(dry_run=False)
+        
+        # Should check status
+        mock_sudo.launchctl.list.assert_called_once()
+        # Should load the service
+        mock_sudo.launchctl.load.assert_called_once_with("-w", "/System/Library/LaunchDaemons/com.apple.screensharing.plist")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_screen_sharing_when_already_enabled(self, mock_sudo, mock_log_info):
+        """Test enabling Screen Sharing when it's already enabled (idempotency)."""
+        # Mock launchctl list showing screen sharing is already loaded
+        mock_sudo.launchctl.list.return_value = "com.apple.someservice\ncom.apple.screensharing\ncom.apple.otherservice"
+        
+        from provision.macos import enable_screen_sharing
+        enable_screen_sharing(dry_run=False)
+        
+        # Should check status
+        mock_sudo.launchctl.list.assert_called_once()
+        # Should NOT load the service
+        mock_sudo.launchctl.load.assert_not_called()
+        # Should log that it's already enabled
+        mock_log_info.assert_called_with("Screen Sharing service is already enabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_screen_sharing_dry_run(self, mock_sudo, mock_log_action):
+        """Test enabling Screen Sharing in dry-run mode."""
+        # Mock launchctl list showing screen sharing is not loaded
+        mock_sudo.launchctl.list.return_value = "com.apple.someservice\ncom.apple.otherservice"
+        
+        from provision.macos import enable_screen_sharing
+        enable_screen_sharing(dry_run=True)
+        
+        # Should check status
+        mock_sudo.launchctl.list.assert_called_once()
+        # Should NOT load the service
+        mock_sudo.launchctl.load.assert_not_called()
+        # Should log dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would enable Screen Sharing service")
+
+
+class TestPowerManagement:
+    """Tests for Power Management configuration."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_when_sleep_enabled(self, mock_pmset, mock_log_info, mock_log_action):
+        """Test disabling sleep settings when they are enabled."""
+        # Mock pmset -g output showing sleep is enabled
+        mock_pmset.side_effect = [
+            # First call: pmset -g
+            " sleep                10 (sleep prevented by 0)\n disksleep            10\n powernap             1",
+            # Subsequent calls for setting values
+            "",  # pmset -a sleep 0
+            "",  # pmset -a disksleep 0
+            "",  # pmset -a powernap 0
+        ]
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=False)
+        
+        # Should check current settings
+        assert mock_pmset.call_args_list[0] == call("-g")
+        
+        # Should set all three settings to 0
+        assert mock_pmset.call_args_list[1] == call("-a", "sleep", "0")
+        assert mock_pmset.call_args_list[2] == call("-a", "disksleep", "0")
+        assert mock_pmset.call_args_list[3] == call("-a", "powernap", "0")
+        
+        # Should log actions
+        mock_log_action.assert_any_call("Disabling system sleep...")
+        mock_log_action.assert_any_call("Disabling disk sleep...")
+        mock_log_action.assert_any_call("Disabling Power Nap...")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_when_already_disabled(self, mock_pmset, mock_log_info):
+        """Test power management when sleep is already disabled (idempotency)."""
+        # Mock pmset -g output showing sleep is already disabled
+        mock_pmset.return_value = " sleep                0 (sleep prevented by 0)\n disksleep            0\n powernap             0"
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=False)
+        
+        # Should only call pmset -g once to check
+        mock_pmset.assert_called_once_with("-g")
+        
+        # Should log that settings are already configured
+        mock_log_info.assert_called_with("Power settings are already configured to prevent sleep.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_dry_run(self, mock_pmset, mock_log_action):
+        """Test power management in dry-run mode."""
+        # Mock pmset -g output showing sleep is enabled
+        mock_pmset.return_value = " sleep                10 (sleep prevented by 0)\n disksleep            10\n powernap             1"
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=True)
+        
+        # Should only check current settings
+        mock_pmset.assert_called_once_with("-g")
+        
+        # Should log dry-run messages
+        mock_log_action.assert_any_call("[DRY RUN] Would disable system sleep")
+        mock_log_action.assert_any_call("[DRY RUN] Would disable disk sleep")
+        mock_log_action.assert_any_call("[DRY RUN] Would disable Power Nap")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_partial_settings(self, mock_pmset, mock_log_info, mock_log_action):
+        """Test power management when only some settings need to be changed."""
+        # Mock pmset -g output showing mixed state
+        mock_pmset.side_effect = [
+            # First call: pmset -g
+            " sleep                0 (sleep prevented by 0)\n disksleep            10\n powernap             0",
+            # Only disksleep needs to be set
+            "",  # pmset -a disksleep 0
+        ]
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=False)
+        
+        # Should check current settings
+        assert mock_pmset.call_args_list[0] == call("-g")
+        
+        # Should only set disksleep (the one that's not 0)
+        assert len(mock_pmset.call_args_list) == 2
+        assert mock_pmset.call_args_list[1] == call("-a", "disksleep", "0")
+        
+        # Should only log action for the setting that was changed
+        mock_log_action.assert_called_once_with("Disabling disk sleep...")
+
+
+class TestDockerStackVerification:
+    """Tests for Docker stack verification."""
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_all_working(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when everything is working."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        # Mock Docker commands work
+        mock_sh.docker.ps.return_value = "CONTAINER ID   IMAGE   COMMAND"
+        mock_sh.docker.compose.ls.return_value = "NAME   STATUS   CONFIG FILES"
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should check DOCKER_HOST
+        mock_environ.get.assert_called_with('DOCKER_HOST')
+        
+        # Should check Colima status
+        mock_sh.colima.status.assert_called_once()
+        
+        # Should check Docker daemon
+        mock_sh.docker.ps.assert_called_once()
+        
+        # Should check Docker Compose
+        mock_sh.docker.compose.ls.assert_called_once()
+        
+        # Should log success messages
+        assert any("DOCKER_HOST is set" in str(call) for call in mock_log_info.call_args_list)
+        assert any("Colima runtime is running" in str(call) for call in mock_log_info.call_args_list)
+        assert any("Docker daemon is accessible" in str(call) for call in mock_log_info.call_args_list)
+        assert any("Docker Compose is working" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_no_docker_host(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when DOCKER_HOST is not set."""
+        # Mock DOCKER_HOST is not set
+        mock_environ.get.return_value = None
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should log warning about DOCKER_HOST
+        assert any("DOCKER_HOST is not set" in str(call) for call in mock_log_action.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_colima_not_running(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when Colima is not running."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is not running
+        mock_sh.colima.status.side_effect = Exception("Colima is not running")
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should not check Docker commands if Colima is not running
+        mock_sh.docker.ps.assert_not_called()
+        mock_sh.docker.compose.ls.assert_not_called()
+        
+        # Should log warnings
+        assert any("Colima is not running" in str(call) for call in mock_log_action.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_docker_not_accessible(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when Docker daemon is not accessible."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        # Mock Docker ps fails
+        mock_sh.docker.ps.side_effect = Exception("Cannot connect to Docker daemon")
+        
+        # Mock Docker Compose works
+        mock_sh.docker.compose.ls.return_value = "NAME   STATUS   CONFIG FILES"
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should log Docker daemon issue
+        assert any("Docker daemon is not accessible" in str(call) for call in mock_log_action.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')  
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_compose_not_working(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when Docker Compose is not working."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        # Mock Docker ps works
+        mock_sh.docker.ps.return_value = "CONTAINER ID   IMAGE   COMMAND"
+        
+        # Mock Docker Compose fails
+        mock_sh.docker.compose.ls.side_effect = Exception("Docker Compose not found")
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should log Docker Compose issue
+        assert any("Docker Compose is not working" in str(call) for call in mock_log_action.call_args_list)
+
+
+class TestTailscaleConnectivityCheck:
+    """Tests for Tailscale connectivity check."""
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_verify_tailscale_connectivity_active(self, mock_sh, mock_log_info):
+        """Test Tailscale connectivity check when already connected."""
+        # Mock tailscale status showing active
+        mock_sh.tailscale.status.return_value = "100.64.0.1   hostname   active"
+        
+        from provision.macos import verify_tailscale_connectivity
+        result = verify_tailscale_connectivity()
+        
+        # Should check status
+        mock_sh.tailscale.status.assert_called_once()
+        
+        # Should return True
+        assert result is True
+        
+        # Should log success
+        assert any("Tailscale is already active" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_verify_tailscale_connectivity_not_active(self, mock_sh, mock_log_info):
+        """Test Tailscale connectivity check when not connected."""
+        # Mock tailscale status showing not active
+        mock_sh.tailscale.status.return_value = "Tailscale is stopped."
+        
+        from provision.macos import verify_tailscale_connectivity
+        result = verify_tailscale_connectivity()
+        
+        # Should check status
+        mock_sh.tailscale.status.assert_called_once()
+        
+        # Should return False
+        assert result is False
+        
+        # Should log guidance
+        assert any("Tailscale is not connected" in str(call) for call in mock_log_info.call_args_list)
+        assert any("sudo tailscale up" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_verify_tailscale_connectivity_command_fails(self, mock_sh, mock_log_info):
+        """Test Tailscale connectivity check when command fails."""
+        # Mock tailscale status command failing
+        mock_sh.tailscale.status.side_effect = Exception("tailscale not found")
+        
+        from provision.macos import verify_tailscale_connectivity
+        result = verify_tailscale_connectivity()
+        
+        # Should return False
+        assert result is False
+        
+        # Should log error
+        assert any("Failed to check Tailscale status" in str(call) for call in mock_log_info.call_args_list)
