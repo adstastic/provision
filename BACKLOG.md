@@ -5,8 +5,8 @@
 - [x] Basic CLI structure
 
 ## Phase 1: Dependency Installation
-- [ ] Homebrew installation check
-- [ ] Brewfile package installation
+- [x] Homebrew installation check
+- [x] Brewfile package installation
 
 ## Phase 2: Tailscale Setup
 - [ ] Tailscale binary installation from source

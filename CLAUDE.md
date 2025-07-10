@@ -205,3 +205,32 @@ After each task completion:
 - **CLAUDE.md**: Document learnings, patterns, or gotchas discovered during implementation
 
 This ensures knowledge is captured immediately while context is fresh.
+
+### Learnings from Dependency Installation Phase
+
+#### Mocking Imports in Tests
+When testing functions that import modules inside them (dynamic imports), mock the actual module path, not where it's imported:
+```python
+# Wrong - won't work for dynamic imports
+@patch('provision.steps.install_homebrew')
+
+# Correct - mocks the actual module
+@patch('provision.macos.install_homebrew')
+```
+
+#### Platform-Specific Code Organization
+- Keep platform detection in the orchestration layer (steps.py)
+- Import platform-specific functions dynamically to avoid import errors on other platforms
+- This allows the code to run on any platform while only importing what's needed
+
+#### Test Organization
+- Group related tests into classes (TestHomebrewCheck, TestHomebrewInstallation, etc.)
+- Write integration tests separately from unit tests
+- Test both success paths and edge cases (dry-run, user-only mode)
+
+#### Shell Command Execution with sh
+The sh library provides a clean interface for shell commands:
+```python
+sh.brew("bundle", f"--file={brewfile_path}")  # Runs: brew bundle --file=/path/to/Brewfile
+sh.curl("-fsSL", "https://...")  # Runs: curl -fsSL https://...
+```
