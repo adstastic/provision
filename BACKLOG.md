@@ -9,7 +9,9 @@
 - [x] Brewfile package installation
 
 ## Phase 2: Tailscale Setup
-- [ ] Tailscale binary installation from source
+- [x] Tailscale binary detection
+- [x] Tailscale version checking (compare with GitHub releases)
+- [x] Tailscale binary installation from source
 - [ ] Tailscale daemon configuration
 - [ ] DNS configuration for MagicDNS
 
