@@ -29,5 +29,5 @@
 - [x] Power management settings
 
 ## Phase 6: Verification
-- [ ] Docker stack verification
-- [ ] Final Tailscale connectivity check
+- [x] Docker stack verification
+- [x] Final Tailscale connectivity check

@@ -367,3 +367,30 @@ sh.go("install", "package@version")  # Runs: go install package@version
 - Mock `sh.pmset()` with appropriate side_effect for multiple calls
 - For pmset output parsing, use multiline strings that match actual output format
 - Test partial configuration changes to ensure only necessary changes are made
+
+### Learnings from Verification Phase
+
+#### Docker Stack Verification
+- Check environment variable with `os.environ.get('DOCKER_HOST')`
+- Verify Colima runtime status with `colima status`
+- Check Docker daemon accessibility with `docker ps`
+- Verify Docker Compose with `docker compose ls`
+- Only check Docker commands if Colima is running to avoid misleading errors
+- Provide helpful guidance when services are not running
+
+#### Tailscale Connectivity Check
+- Use `tailscale status` to check if connected
+- Look for "active" in the output to determine connectivity
+- Return boolean value to indicate connection status
+- Provide clear instructions for manual connection if needed
+- Handle exceptions gracefully when command fails
+
+#### Sleep/Timing Considerations
+- Add short sleep (2s) before Docker verification to allow services to stabilize
+- This prevents false negatives when services are still initializing
+
+#### Verification Architecture
+- Keep verification functions focused and single-purpose
+- Orchestrate multiple verifications in steps.py
+- Don't require root access for verification phase
+- Provide clear feedback about what's working and what needs attention

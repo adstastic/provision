@@ -11,13 +11,14 @@ class TestProvisionSystem:
     """Tests for the main provisioning workflow."""
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.verify_system')
     @patch('provision.steps.configure_system')
     @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
     def test_provision_system_on_macos(self, mock_install_deps, mock_setup_ts, mock_configure_services, 
-                                      mock_configure_security, mock_configure_system, mock_platform):
+                                      mock_configure_security, mock_configure_system, mock_verify_system, mock_platform):
         """Test provisioning workflow on macOS."""
         mock_platform.return_value = 'Darwin'
         
@@ -28,15 +29,17 @@ class TestProvisionSystem:
         mock_configure_services.assert_called_once_with(dry_run=False, user_only=False)
         mock_configure_security.assert_called_once_with(dry_run=False, user_only=False)
         mock_configure_system.assert_called_once_with(dry_run=False, user_only=False)
+        mock_verify_system.assert_called_once()
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.verify_system')
     @patch('provision.steps.configure_system')
     @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
     def test_provision_system_dry_run(self, mock_install_deps, mock_setup_ts, mock_configure_services, 
-                                     mock_configure_security, mock_configure_system, mock_platform):
+                                     mock_configure_security, mock_configure_system, mock_verify_system, mock_platform):
         """Test provisioning workflow in dry-run mode."""
         mock_platform.return_value = 'Darwin'
         
@@ -47,15 +50,17 @@ class TestProvisionSystem:
         mock_configure_services.assert_called_once_with(dry_run=True, user_only=False)
         mock_configure_security.assert_called_once_with(dry_run=True, user_only=False)
         mock_configure_system.assert_called_once_with(dry_run=True, user_only=False)
+        mock_verify_system.assert_called_once()
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.verify_system')
     @patch('provision.steps.configure_system')
     @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
     def test_provision_system_user_only(self, mock_install_deps, mock_setup_ts, mock_configure_services,
-                                       mock_configure_security, mock_configure_system, mock_platform):
+                                       mock_configure_security, mock_configure_system, mock_verify_system, mock_platform):
         """Test provisioning workflow in user-only mode."""
         mock_platform.return_value = 'Darwin'
         
@@ -66,6 +71,7 @@ class TestProvisionSystem:
         mock_configure_services.assert_called_once_with(dry_run=False, user_only=True)
         mock_configure_security.assert_called_once_with(dry_run=False, user_only=True)
         mock_configure_system.assert_called_once_with(dry_run=False, user_only=True)
+        mock_verify_system.assert_called_once()
     
     @patch('provision.steps.platform.system')
     def test_provision_system_unsupported_platform(self, mock_platform):
@@ -303,3 +309,35 @@ class TestSystemConfiguration:
             
             # Should log that we're skipping
             assert any("Skipping system configuration" in str(call) for call in mock_log_info.call_args_list)
+
+
+class TestSystemVerification:
+    """Tests for system verification phase."""
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_verify_system_macos(self, mock_platform, mock_log_info):
+        """Test system verification on macOS."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.verify_docker_stack') as mock_docker_verify, \
+             patch('provision.macos.verify_tailscale_connectivity') as mock_tailscale_verify:
+            
+            mock_tailscale_verify.return_value = True  # Tailscale is connected
+            
+            from provision.steps import verify_system
+            verify_system()
+            
+            # Should call both verification functions
+            mock_docker_verify.assert_called_once()
+            mock_tailscale_verify.assert_called_once()
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_verify_system_unsupported_platform(self, mock_platform, mock_log_info):
+        """Test system verification on unsupported platform."""
+        mock_platform.return_value = 'Linux'
+        
+        from provision.steps import verify_system
+        with pytest.raises(NotImplementedError, match="Platform Linux is not supported yet"):
+            verify_system()

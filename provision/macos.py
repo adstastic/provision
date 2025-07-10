@@ -476,3 +476,61 @@ def configure_power_management(dry_run: bool = False) -> None:
         
     except Exception as e:
         log_action(f"Failed to configure power management: {e}")
+
+
+def verify_docker_stack() -> None:
+    """Verify Docker stack is working correctly."""
+    log_info("Verifying Docker stack...")
+    
+    # Wait a moment for services to be ready
+    import time
+    time.sleep(2)
+    
+    # Check if DOCKER_HOST is configured
+    docker_host = os.environ.get('DOCKER_HOST')
+    if not docker_host:
+        log_action("DOCKER_HOST is not set. Please configure your shell as shown at the end of this script.")
+    else:
+        log_info(f"DOCKER_HOST is set to: {docker_host}")
+    
+    # Check if Colima is actually running
+    try:
+        sh.colima.status()
+        log_info("Colima runtime is running.")
+        
+        # Only test Docker if Colima is running
+        try:
+            sh.docker.ps()
+            log_info("Docker daemon is accessible.")
+        except Exception:
+            log_action("Docker daemon is not accessible. Check DOCKER_HOST and Colima status.")
+        
+        try:
+            sh.docker.compose.ls()
+            log_info("Docker Compose is working.")
+        except Exception:
+            log_action("Docker Compose is not working properly.")
+    except Exception:
+        log_action("Colima is not running. Docker commands will fail until Colima is started.")
+        log_action("The LaunchAgent may have failed to start Colima automatically.")
+        log_action("Try running 'colima start' manually to start the Docker runtime.")
+
+
+def verify_tailscale_connectivity() -> bool:
+    """Verify Tailscale connectivity. Returns True if connected."""
+    log_info("Verifying Tailscale connectivity...")
+    
+    try:
+        status_output = str(sh.tailscale.status())
+        
+        if "active" in status_output:
+            log_info("Tailscale is already active.")
+            return True
+        else:
+            log_info("Tailscale is not connected. The final step is to connect to your Tailnet.")
+            log_info("Please run the following command and follow the authentication link:")
+            log_info("\n    sudo tailscale up\n")
+            return False
+    except Exception as e:
+        log_info(f"Failed to check Tailscale status: {e}")
+        return False

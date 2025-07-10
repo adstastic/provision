@@ -116,6 +116,28 @@ def configure_system(dry_run: bool = False, user_only: bool = False) -> None:
         raise NotImplementedError(f"Platform {current_platform} is not supported yet")
 
 
+def verify_system() -> None:
+    """Verify the system is properly configured."""
+    current_platform = platform.system()
+    
+    if current_platform == 'Darwin':
+        log_info("Verifying system configuration...")
+        
+        # Import verification functions
+        from provision.macos import verify_docker_stack, verify_tailscale_connectivity
+        
+        # Verify Docker stack
+        verify_docker_stack()
+        
+        # Verify Tailscale connectivity
+        verify_tailscale_connectivity()
+        
+        log_info("\n--- Setup Complete ---")
+        
+    else:
+        raise NotImplementedError(f"Platform {current_platform} is not supported yet")
+
+
 def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     """Main provisioning workflow - delegates to platform-specific implementations."""
     current_platform = platform.system()
@@ -138,4 +160,5 @@ def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     # Phase 5: System configuration
     configure_system(dry_run=dry_run, user_only=user_only)
     
-    # TODO: Phase 6: Verification
+    # Phase 6: Verification
+    verify_system()

@@ -1025,3 +1025,191 @@ class TestPowerManagement:
         
         # Should only log action for the setting that was changed
         mock_log_action.assert_called_once_with("Disabling disk sleep...")
+
+
+class TestDockerStackVerification:
+    """Tests for Docker stack verification."""
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_all_working(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when everything is working."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        # Mock Docker commands work
+        mock_sh.docker.ps.return_value = "CONTAINER ID   IMAGE   COMMAND"
+        mock_sh.docker.compose.ls.return_value = "NAME   STATUS   CONFIG FILES"
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should check DOCKER_HOST
+        mock_environ.get.assert_called_with('DOCKER_HOST')
+        
+        # Should check Colima status
+        mock_sh.colima.status.assert_called_once()
+        
+        # Should check Docker daemon
+        mock_sh.docker.ps.assert_called_once()
+        
+        # Should check Docker Compose
+        mock_sh.docker.compose.ls.assert_called_once()
+        
+        # Should log success messages
+        assert any("DOCKER_HOST is set" in str(call) for call in mock_log_info.call_args_list)
+        assert any("Colima runtime is running" in str(call) for call in mock_log_info.call_args_list)
+        assert any("Docker daemon is accessible" in str(call) for call in mock_log_info.call_args_list)
+        assert any("Docker Compose is working" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_no_docker_host(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when DOCKER_HOST is not set."""
+        # Mock DOCKER_HOST is not set
+        mock_environ.get.return_value = None
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should log warning about DOCKER_HOST
+        assert any("DOCKER_HOST is not set" in str(call) for call in mock_log_action.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_colima_not_running(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when Colima is not running."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is not running
+        mock_sh.colima.status.side_effect = Exception("Colima is not running")
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should not check Docker commands if Colima is not running
+        mock_sh.docker.ps.assert_not_called()
+        mock_sh.docker.compose.ls.assert_not_called()
+        
+        # Should log warnings
+        assert any("Colima is not running" in str(call) for call in mock_log_action.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_docker_not_accessible(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when Docker daemon is not accessible."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        # Mock Docker ps fails
+        mock_sh.docker.ps.side_effect = Exception("Cannot connect to Docker daemon")
+        
+        # Mock Docker Compose works
+        mock_sh.docker.compose.ls.return_value = "NAME   STATUS   CONFIG FILES"
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should log Docker daemon issue
+        assert any("Docker daemon is not accessible" in str(call) for call in mock_log_action.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.log_action')  
+    @patch('provision.macos.os.environ')
+    @patch('provision.macos.sh')
+    def test_verify_docker_stack_compose_not_working(self, mock_sh, mock_environ, mock_log_action, mock_log_info):
+        """Test Docker stack verification when Docker Compose is not working."""
+        # Mock DOCKER_HOST is set
+        mock_environ.get.return_value = "unix:///home/user/.colima/default/docker.sock"
+        
+        # Mock Colima is running
+        mock_sh.colima.status.return_value = "Colima is running"
+        
+        # Mock Docker ps works
+        mock_sh.docker.ps.return_value = "CONTAINER ID   IMAGE   COMMAND"
+        
+        # Mock Docker Compose fails
+        mock_sh.docker.compose.ls.side_effect = Exception("Docker Compose not found")
+        
+        from provision.macos import verify_docker_stack
+        verify_docker_stack()
+        
+        # Should log Docker Compose issue
+        assert any("Docker Compose is not working" in str(call) for call in mock_log_action.call_args_list)
+
+
+class TestTailscaleConnectivityCheck:
+    """Tests for Tailscale connectivity check."""
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_verify_tailscale_connectivity_active(self, mock_sh, mock_log_info):
+        """Test Tailscale connectivity check when already connected."""
+        # Mock tailscale status showing active
+        mock_sh.tailscale.status.return_value = "100.64.0.1   hostname   active"
+        
+        from provision.macos import verify_tailscale_connectivity
+        result = verify_tailscale_connectivity()
+        
+        # Should check status
+        mock_sh.tailscale.status.assert_called_once()
+        
+        # Should return True
+        assert result is True
+        
+        # Should log success
+        assert any("Tailscale is already active" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_verify_tailscale_connectivity_not_active(self, mock_sh, mock_log_info):
+        """Test Tailscale connectivity check when not connected."""
+        # Mock tailscale status showing not active
+        mock_sh.tailscale.status.return_value = "Tailscale is stopped."
+        
+        from provision.macos import verify_tailscale_connectivity
+        result = verify_tailscale_connectivity()
+        
+        # Should check status
+        mock_sh.tailscale.status.assert_called_once()
+        
+        # Should return False
+        assert result is False
+        
+        # Should log guidance
+        assert any("Tailscale is not connected" in str(call) for call in mock_log_info.call_args_list)
+        assert any("sudo tailscale up" in str(call) for call in mock_log_info.call_args_list)
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_verify_tailscale_connectivity_command_fails(self, mock_sh, mock_log_info):
+        """Test Tailscale connectivity check when command fails."""
+        # Mock tailscale status command failing
+        mock_sh.tailscale.status.side_effect = Exception("tailscale not found")
+        
+        from provision.macos import verify_tailscale_connectivity
+        result = verify_tailscale_connectivity()
+        
+        # Should return False
+        assert result is False
+        
+        # Should log error
+        assert any("Failed to check Tailscale status" in str(call) for call in mock_log_info.call_args_list)
