@@ -25,8 +25,8 @@
 - [x] Firewall configuration
 
 ## Phase 5: System Configuration
-- [ ] Screen sharing setup
-- [ ] Power management settings
+- [x] Screen sharing setup
+- [x] Power management settings
 
 ## Phase 6: Verification
 - [ ] Docker stack verification

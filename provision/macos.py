@@ -406,3 +406,73 @@ def configure_firewall(dry_run: bool = False) -> None:
         
     except Exception as e:
         log_action(f"Failed to configure firewall: {e}")
+
+
+def enable_screen_sharing(dry_run: bool = False) -> None:
+    """Enable Screen Sharing (VNC) service for remote GUI access."""
+    try:
+        # Check if Screen Sharing service is already loaded
+        launchctl_list = str(sh.sudo.launchctl.list())
+        
+        if "com.apple.screensharing" in launchctl_list:
+            log_info("Screen Sharing service is already enabled.")
+            return
+        
+        if dry_run:
+            log_action("[DRY RUN] Would enable Screen Sharing service")
+            return
+        
+        log_action("Screen Sharing service is not loaded. Enabling...")
+        sh.sudo.launchctl.load("-w", "/System/Library/LaunchDaemons/com.apple.screensharing.plist")
+        
+    except Exception as e:
+        log_action(f"Failed to enable Screen Sharing: {e}")
+
+
+def configure_power_management(dry_run: bool = False) -> None:
+    """Configure power management settings to prevent sleep."""
+    try:
+        # Get current power management settings
+        pmset_output = str(sh.pmset("-g"))
+        
+        # Check if any changes are needed
+        changes_needed = []
+        
+        # Parse sleep setting
+        import re
+        sleep_match = re.search(r'^\s*sleep\s+(\d+)', pmset_output, re.MULTILINE)
+        if sleep_match and sleep_match.group(1) != "0":
+            changes_needed.append(("sleep", "Disabling system sleep..."))
+        
+        # Parse disksleep setting
+        disksleep_match = re.search(r'^\s*disksleep\s+(\d+)', pmset_output, re.MULTILINE)
+        if disksleep_match and disksleep_match.group(1) != "0":
+            changes_needed.append(("disksleep", "Disabling disk sleep..."))
+        
+        # Parse powernap setting
+        powernap_match = re.search(r'^\s*powernap\s+(\d+)', pmset_output, re.MULTILINE)
+        if powernap_match and powernap_match.group(1) != "0":
+            changes_needed.append(("powernap", "Disabling Power Nap..."))
+        
+        if not changes_needed:
+            log_info("Power settings are already configured to prevent sleep.")
+            return
+        
+        if dry_run:
+            if any(setting[0] == "sleep" for setting in changes_needed):
+                log_action("[DRY RUN] Would disable system sleep")
+            if any(setting[0] == "disksleep" for setting in changes_needed):
+                log_action("[DRY RUN] Would disable disk sleep")
+            if any(setting[0] == "powernap" for setting in changes_needed):
+                log_action("[DRY RUN] Would disable Power Nap")
+            return
+        
+        # Apply changes
+        for setting_name, log_message in changes_needed:
+            log_action(log_message)
+            sh.pmset("-a", setting_name, "0")
+        
+        log_info("Power settings configured to prevent sleep.")
+        
+    except Exception as e:
+        log_action(f"Failed to configure power management: {e}")

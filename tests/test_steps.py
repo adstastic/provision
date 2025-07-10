@@ -11,12 +11,13 @@ class TestProvisionSystem:
     """Tests for the main provisioning workflow."""
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.configure_system')
     @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
     def test_provision_system_on_macos(self, mock_install_deps, mock_setup_ts, mock_configure_services, 
-                                      mock_configure_security, mock_platform):
+                                      mock_configure_security, mock_configure_system, mock_platform):
         """Test provisioning workflow on macOS."""
         mock_platform.return_value = 'Darwin'
         
@@ -26,14 +27,16 @@ class TestProvisionSystem:
         mock_setup_ts.assert_called_once_with(dry_run=False, user_only=False)
         mock_configure_services.assert_called_once_with(dry_run=False, user_only=False)
         mock_configure_security.assert_called_once_with(dry_run=False, user_only=False)
+        mock_configure_system.assert_called_once_with(dry_run=False, user_only=False)
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.configure_system')
     @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
     def test_provision_system_dry_run(self, mock_install_deps, mock_setup_ts, mock_configure_services, 
-                                     mock_configure_security, mock_platform):
+                                     mock_configure_security, mock_configure_system, mock_platform):
         """Test provisioning workflow in dry-run mode."""
         mock_platform.return_value = 'Darwin'
         
@@ -43,14 +46,16 @@ class TestProvisionSystem:
         mock_setup_ts.assert_called_once_with(dry_run=True, user_only=False)
         mock_configure_services.assert_called_once_with(dry_run=True, user_only=False)
         mock_configure_security.assert_called_once_with(dry_run=True, user_only=False)
+        mock_configure_system.assert_called_once_with(dry_run=True, user_only=False)
     
     @patch('provision.steps.platform.system')
+    @patch('provision.steps.configure_system')
     @patch('provision.steps.configure_security')
     @patch('provision.steps.configure_services')
     @patch('provision.steps.setup_tailscale')
     @patch('provision.steps.install_dependencies')
     def test_provision_system_user_only(self, mock_install_deps, mock_setup_ts, mock_configure_services,
-                                       mock_configure_security, mock_platform):
+                                       mock_configure_security, mock_configure_system, mock_platform):
         """Test provisioning workflow in user-only mode."""
         mock_platform.return_value = 'Darwin'
         
@@ -60,6 +65,7 @@ class TestProvisionSystem:
         mock_setup_ts.assert_called_once_with(dry_run=False, user_only=True)
         mock_configure_services.assert_called_once_with(dry_run=False, user_only=True)
         mock_configure_security.assert_called_once_with(dry_run=False, user_only=True)
+        mock_configure_system.assert_called_once_with(dry_run=False, user_only=True)
     
     @patch('provision.steps.platform.system')
     def test_provision_system_unsupported_platform(self, mock_platform):
@@ -242,3 +248,58 @@ class TestSecurityConfiguration:
             
             # Should log that we're skipping
             assert any("Skipping security configuration" in str(call) for call in mock_log_info.call_args_list)
+
+
+class TestSystemConfiguration:
+    """Tests for system configuration phase."""
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_configure_system_macos(self, mock_platform, mock_log_info):
+        """Test system configuration on macOS."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.enable_screen_sharing') as mock_screen_sharing, \
+             patch('provision.macos.configure_power_management') as mock_power_mgmt:
+            
+            from provision.steps import configure_system
+            configure_system(dry_run=False, user_only=False)
+            
+            # Should call both system functions
+            mock_screen_sharing.assert_called_once_with(dry_run=False)
+            mock_power_mgmt.assert_called_once_with(dry_run=False)
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_configure_system_macos_dry_run(self, mock_platform, mock_log_info):
+        """Test system configuration in dry-run mode."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.enable_screen_sharing') as mock_screen_sharing, \
+             patch('provision.macos.configure_power_management') as mock_power_mgmt:
+            
+            from provision.steps import configure_system
+            configure_system(dry_run=True, user_only=False)
+            
+            # Should call both with dry_run=True
+            mock_screen_sharing.assert_called_once_with(dry_run=True)
+            mock_power_mgmt.assert_called_once_with(dry_run=True)
+    
+    @patch('provision.steps.log_info')
+    @patch('provision.steps.platform.system')
+    def test_configure_system_macos_user_only(self, mock_platform, mock_log_info):
+        """Test system configuration in user-only mode (skips root operations)."""
+        mock_platform.return_value = 'Darwin'
+        
+        with patch('provision.macos.enable_screen_sharing') as mock_screen_sharing, \
+             patch('provision.macos.configure_power_management') as mock_power_mgmt:
+            
+            from provision.steps import configure_system
+            configure_system(dry_run=False, user_only=True)
+            
+            # Should skip all system functions (they all require root)
+            mock_screen_sharing.assert_not_called()
+            mock_power_mgmt.assert_not_called()
+            
+            # Should log that we're skipping
+            assert any("Skipping system configuration" in str(call) for call in mock_log_info.call_args_list)

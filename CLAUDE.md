@@ -343,3 +343,27 @@ sh.go("install", "package@version")  # Runs: go install package@version
 - In user-only mode, skip the entire security configuration phase
 - Group related security settings together for clarity
 - Always check current state before making changes (idempotency)
+
+### Learnings from System Configuration Phase
+
+#### Screen Sharing Management
+- Use `launchctl list` to check if Screen Sharing service is loaded
+- The service name is `com.apple.screensharing`
+- Enable with: `sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist`
+- The `-w` flag persists the setting across reboots by updating the overrides plist
+
+#### Power Management with pmset
+- Use `pmset -g` to get current power management settings
+- Parse settings using regex to extract values for specific settings
+- Key settings for headless servers:
+  - `sleep 0` - Disable system sleep
+  - `disksleep 0` - Disable disk sleep  
+  - `powernap 0` - Disable Power Nap
+- Use `-a` flag to apply settings for all power sources
+- Always check current values before changing (idempotency)
+
+#### Testing Patterns for System Configuration
+- Mock `sh.sudo.launchctl.list()` to return service list as a string
+- Mock `sh.pmset()` with appropriate side_effect for multiple calls
+- For pmset output parsing, use multiline strings that match actual output format
+- Test partial configuration changes to ensure only necessary changes are made

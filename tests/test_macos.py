@@ -877,3 +877,151 @@ class TestFirewallConfiguration:
         
         # Should add missing exception
         mock_log_action.assert_any_call("Adding firewall exception for: /opt/homebrew/bin/tailscaled")
+
+
+class TestScreenSharingSetup:
+    """Tests for Screen Sharing setup."""
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_screen_sharing_when_not_enabled(self, mock_sudo, mock_log_info):
+        """Test enabling Screen Sharing when it's not enabled."""
+        # Mock launchctl list showing screen sharing is not loaded
+        mock_sudo.launchctl.list.return_value = "com.apple.someservice\ncom.apple.otherservice"
+        
+        from provision.macos import enable_screen_sharing
+        enable_screen_sharing(dry_run=False)
+        
+        # Should check status
+        mock_sudo.launchctl.list.assert_called_once()
+        # Should load the service
+        mock_sudo.launchctl.load.assert_called_once_with("-w", "/System/Library/LaunchDaemons/com.apple.screensharing.plist")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_screen_sharing_when_already_enabled(self, mock_sudo, mock_log_info):
+        """Test enabling Screen Sharing when it's already enabled (idempotency)."""
+        # Mock launchctl list showing screen sharing is already loaded
+        mock_sudo.launchctl.list.return_value = "com.apple.someservice\ncom.apple.screensharing\ncom.apple.otherservice"
+        
+        from provision.macos import enable_screen_sharing
+        enable_screen_sharing(dry_run=False)
+        
+        # Should check status
+        mock_sudo.launchctl.list.assert_called_once()
+        # Should NOT load the service
+        mock_sudo.launchctl.load.assert_not_called()
+        # Should log that it's already enabled
+        mock_log_info.assert_called_with("Screen Sharing service is already enabled.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_screen_sharing_dry_run(self, mock_sudo, mock_log_action):
+        """Test enabling Screen Sharing in dry-run mode."""
+        # Mock launchctl list showing screen sharing is not loaded
+        mock_sudo.launchctl.list.return_value = "com.apple.someservice\ncom.apple.otherservice"
+        
+        from provision.macos import enable_screen_sharing
+        enable_screen_sharing(dry_run=True)
+        
+        # Should check status
+        mock_sudo.launchctl.list.assert_called_once()
+        # Should NOT load the service
+        mock_sudo.launchctl.load.assert_not_called()
+        # Should log dry-run message
+        mock_log_action.assert_called_with("[DRY RUN] Would enable Screen Sharing service")
+
+
+class TestPowerManagement:
+    """Tests for Power Management configuration."""
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_when_sleep_enabled(self, mock_pmset, mock_log_info, mock_log_action):
+        """Test disabling sleep settings when they are enabled."""
+        # Mock pmset -g output showing sleep is enabled
+        mock_pmset.side_effect = [
+            # First call: pmset -g
+            " sleep                10 (sleep prevented by 0)\n disksleep            10\n powernap             1",
+            # Subsequent calls for setting values
+            "",  # pmset -a sleep 0
+            "",  # pmset -a disksleep 0
+            "",  # pmset -a powernap 0
+        ]
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=False)
+        
+        # Should check current settings
+        assert mock_pmset.call_args_list[0] == call("-g")
+        
+        # Should set all three settings to 0
+        assert mock_pmset.call_args_list[1] == call("-a", "sleep", "0")
+        assert mock_pmset.call_args_list[2] == call("-a", "disksleep", "0")
+        assert mock_pmset.call_args_list[3] == call("-a", "powernap", "0")
+        
+        # Should log actions
+        mock_log_action.assert_any_call("Disabling system sleep...")
+        mock_log_action.assert_any_call("Disabling disk sleep...")
+        mock_log_action.assert_any_call("Disabling Power Nap...")
+    
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_when_already_disabled(self, mock_pmset, mock_log_info):
+        """Test power management when sleep is already disabled (idempotency)."""
+        # Mock pmset -g output showing sleep is already disabled
+        mock_pmset.return_value = " sleep                0 (sleep prevented by 0)\n disksleep            0\n powernap             0"
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=False)
+        
+        # Should only call pmset -g once to check
+        mock_pmset.assert_called_once_with("-g")
+        
+        # Should log that settings are already configured
+        mock_log_info.assert_called_with("Power settings are already configured to prevent sleep.")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_dry_run(self, mock_pmset, mock_log_action):
+        """Test power management in dry-run mode."""
+        # Mock pmset -g output showing sleep is enabled
+        mock_pmset.return_value = " sleep                10 (sleep prevented by 0)\n disksleep            10\n powernap             1"
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=True)
+        
+        # Should only check current settings
+        mock_pmset.assert_called_once_with("-g")
+        
+        # Should log dry-run messages
+        mock_log_action.assert_any_call("[DRY RUN] Would disable system sleep")
+        mock_log_action.assert_any_call("[DRY RUN] Would disable disk sleep")
+        mock_log_action.assert_any_call("[DRY RUN] Would disable Power Nap")
+    
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.pmset')
+    def test_configure_power_management_partial_settings(self, mock_pmset, mock_log_info, mock_log_action):
+        """Test power management when only some settings need to be changed."""
+        # Mock pmset -g output showing mixed state
+        mock_pmset.side_effect = [
+            # First call: pmset -g
+            " sleep                0 (sleep prevented by 0)\n disksleep            10\n powernap             0",
+            # Only disksleep needs to be set
+            "",  # pmset -a disksleep 0
+        ]
+        
+        from provision.macos import configure_power_management
+        configure_power_management(dry_run=False)
+        
+        # Should check current settings
+        assert mock_pmset.call_args_list[0] == call("-g")
+        
+        # Should only set disksleep (the one that's not 0)
+        assert len(mock_pmset.call_args_list) == 2
+        assert mock_pmset.call_args_list[1] == call("-a", "disksleep", "0")
+        
+        # Should only log action for the setting that was changed
+        mock_log_action.assert_called_once_with("Disabling disk sleep...")

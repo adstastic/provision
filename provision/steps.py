@@ -93,6 +93,29 @@ def configure_security(dry_run: bool = False, user_only: bool = False) -> None:
         raise NotImplementedError(f"Platform {current_platform} is not supported yet")
 
 
+def configure_system(dry_run: bool = False, user_only: bool = False) -> None:
+    """Configure system settings based on the platform."""
+    current_platform = platform.system()
+    
+    if current_platform == 'Darwin':
+        if user_only:
+            log_info("Skipping system configuration in user-only mode (requires root).")
+            return
+            
+        log_info("Configuring system settings for macOS...")
+        
+        # Import system configuration functions
+        from provision.macos import enable_screen_sharing, configure_power_management
+        
+        # Enable Screen Sharing for remote GUI access
+        enable_screen_sharing(dry_run=dry_run)
+        
+        # Configure power management to prevent sleep
+        configure_power_management(dry_run=dry_run)
+    else:
+        raise NotImplementedError(f"Platform {current_platform} is not supported yet")
+
+
 def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     """Main provisioning workflow - delegates to platform-specific implementations."""
     current_platform = platform.system()
@@ -112,5 +135,7 @@ def provision_system(dry_run: bool = False, user_only: bool = False) -> None:
     # Phase 4: Security configuration
     configure_security(dry_run=dry_run, user_only=user_only)
     
-    # TODO: Phase 5: System configuration
+    # Phase 5: System configuration
+    configure_system(dry_run=dry_run, user_only=user_only)
+    
     # TODO: Phase 6: Verification
