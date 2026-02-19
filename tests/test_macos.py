@@ -336,7 +336,8 @@ class TestTailscaleDaemon:
         from provision.macos import install_tailscale_daemon
         install_tailscale_daemon(dry_run=False)
         
-        mock_path_class.assert_called_with("/Library/LaunchDaemons/com.tailscale.tailscaled.plist")
+        mock_path_class.assert_any_call("/Library/LaunchDaemons/com.tailscale.tailscaled.plist")
+        mock_path_class.assert_any_call("/Library/LaunchDaemons/homebrew.mxcl.tailscale.plist")
         mock_log_action.assert_called_with("Tailscale system daemon not found. Installing...")
         mock_sudo.assert_called_once_with("/opt/homebrew/bin/tailscaled", "install-system-daemon")
     
@@ -660,99 +661,99 @@ class TestColimaService:
 
 
 class TestFileVaultManagement:
-    """Tests for FileVault management."""
-    
+    """Tests for FileVault management (enable logic for macOS Tahoe)."""
+
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_manage_filevault_already_enabled(self, mock_sudo, mock_log_info):
+        """Test FileVault management when already enabled (idempotency)."""
+        # Mock fdesetup status showing FileVault is on
+        mock_sudo.fdesetup.return_value = "FileVault is On."
+
+        from provision.macos import manage_filevault
+        manage_filevault(dry_run=False)
+
+        # Should only check status, not enable again
+        mock_sudo.fdesetup.assert_called_once_with("status")
+        mock_log_info.assert_called_with("FileVault is already enabled.")
+
     @patch('provision.macos.log_action')
     @patch('provision.macos.log_info')
     @patch('provision.macos.sh.sudo')
-    def test_manage_filevault_when_enabled(self, mock_sudo, mock_log_info, mock_log_action):
-        """Test disabling FileVault when it's enabled."""
-        # Mock fdesetup status showing FileVault is on
-        mock_sudo.fdesetup.return_value = "FileVault is On."
-        
-        from provision.macos import manage_filevault
-        manage_filevault(dry_run=False)
-        
-        # Should check status and disable
-        mock_sudo.fdesetup.assert_any_call("status")
-        mock_log_action.assert_called_with("FileVault is enabled. Disabling for headless boot...")
-        mock_sudo.fdesetup.assert_any_call("disable")
-    
-    @patch('provision.macos.log_info')
-    @patch('provision.macos.sh.sudo')
-    def test_manage_filevault_already_disabled(self, mock_sudo, mock_log_info):
-        """Test FileVault management when already disabled (idempotency)."""
+    def test_manage_filevault_when_disabled(self, mock_sudo, mock_log_info, mock_log_action):
+        """Test enabling FileVault when it's disabled."""
         # Mock fdesetup status showing FileVault is off
         mock_sudo.fdesetup.return_value = "FileVault is Off."
-        
+
         from provision.macos import manage_filevault
         manage_filevault(dry_run=False)
-        
-        # Should only check status, not disable
-        mock_sudo.fdesetup.assert_called_once_with("status")
-        mock_log_info.assert_called_with("FileVault is already disabled.")
-    
+
+        # Should check status and enable
+        mock_sudo.fdesetup.assert_any_call("status")
+        mock_log_action.assert_called_with("FileVault is disabled. Enabling...")
+        mock_sudo.fdesetup.assert_any_call("enable")
+
     @patch('provision.macos.log_action')
     @patch('provision.macos.sh.sudo')
     def test_manage_filevault_dry_run(self, mock_sudo, mock_log_action):
         """Test FileVault management in dry-run mode."""
-        # Mock fdesetup status showing FileVault is on
-        mock_sudo.fdesetup.return_value = "FileVault is On."
-        
+        # Mock fdesetup status showing FileVault is off
+        mock_sudo.fdesetup.return_value = "FileVault is Off."
+
         from provision.macos import manage_filevault
         manage_filevault(dry_run=True)
-        
-        # Should check status but not disable
+
+        # Should check status but not enable
         mock_sudo.fdesetup.assert_called_once_with("status")
-        mock_log_action.assert_called_with("[DRY RUN] Would disable FileVault")
+        mock_log_action.assert_called_with("[DRY RUN] Would enable FileVault")
 
 
 class TestSSHManagement:
-    """Tests for SSH (Remote Login) management."""
-    
+    """Tests for SSH (Remote Login) management — enable for macOS Tahoe pre-boot unlock."""
+
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
+    def test_enable_ssh_already_enabled(self, mock_sudo, mock_log_info):
+        """Test SSH management when already enabled (idempotency)."""
+        # Mock systemsetup showing Remote Login is on
+        mock_sudo.systemsetup.return_value = "Remote Login: On"
+
+        from provision.macos import enable_ssh
+        enable_ssh(dry_run=False)
+
+        # Should only check status, not enable again
+        mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
+        mock_log_info.assert_called_with("Remote Login (SSH) is already enabled.")
+
     @patch('provision.macos.log_action')
     @patch('provision.macos.log_info')
     @patch('provision.macos.sh.sudo')
-    def test_disable_ssh_when_enabled(self, mock_sudo, mock_log_info, mock_log_action):
-        """Test disabling SSH when it's enabled."""
-        # Mock systemsetup showing Remote Login is on
-        mock_sudo.systemsetup.return_value = "Remote Login: On"
-        
-        from provision.macos import disable_ssh
-        disable_ssh(dry_run=False)
-        
-        # Should check status and disable
-        mock_sudo.systemsetup.assert_any_call("-getremotelogin")
-        mock_log_action.assert_called_with("Standard SSH (Remote Login) is enabled. Disabling...")
-        mock_sudo.systemsetup.assert_any_call("-setremotelogin", "off")
-    
-    @patch('provision.macos.log_info')
-    @patch('provision.macos.sh.sudo')
-    def test_disable_ssh_already_disabled(self, mock_sudo, mock_log_info):
-        """Test SSH management when already disabled (idempotency)."""
+    def test_enable_ssh_when_disabled(self, mock_sudo, mock_log_info, mock_log_action):
+        """Test enabling SSH when it's disabled."""
         # Mock systemsetup showing Remote Login is off
         mock_sudo.systemsetup.return_value = "Remote Login: Off"
-        
-        from provision.macos import disable_ssh
-        disable_ssh(dry_run=False)
-        
-        # Should only check status, not disable
-        mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
-        mock_log_info.assert_called_with("Standard SSH (Remote Login) is already disabled.")
-    
+
+        from provision.macos import enable_ssh
+        enable_ssh(dry_run=False)
+
+        # Should check status and enable
+        mock_sudo.systemsetup.assert_any_call("-getremotelogin")
+        mock_log_action.assert_called_with("Enabling Remote Login (SSH) for pre-boot FileVault unlock...")
+        mock_sudo.systemsetup.assert_any_call("-setremotelogin", "on")
+
     @patch('provision.macos.log_action')
     @patch('provision.macos.sh.sudo')
-    def test_disable_ssh_dry_run(self, mock_sudo, mock_log_action):
-        """Test SSH disabling in dry-run mode."""
-        # Mock systemsetup showing Remote Login is on
-        mock_sudo.systemsetup.return_value = "Remote Login: On"
-        
-        from provision.macos import disable_ssh
-        disable_ssh(dry_run=True)
-        
-        # Should check status but not disable
+    def test_enable_ssh_dry_run(self, mock_sudo, mock_log_action):
+        """Test SSH enabling in dry-run mode."""
+        # Mock systemsetup showing Remote Login is off
+        mock_sudo.systemsetup.return_value = "Remote Login: Off"
+
+        from provision.macos import enable_ssh
+        enable_ssh(dry_run=True)
+
+        # Should check status but not enable
         mock_sudo.systemsetup.assert_called_once_with("-getremotelogin")
-        mock_log_action.assert_called_with("[DRY RUN] Would disable SSH (Remote Login)")
+        mock_log_action.assert_called_with("[DRY RUN] Would enable Remote Login (SSH)")
 
 
 class TestFirewallConfiguration:

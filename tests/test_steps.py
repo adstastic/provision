@@ -205,7 +205,7 @@ class TestSecurityConfiguration:
         mock_platform.return_value = 'Darwin'
         
         with patch('provision.macos.manage_filevault') as mock_filevault, \
-             patch('provision.macos.disable_ssh') as mock_ssh, \
+             patch('provision.macos.enable_ssh') as mock_ssh, \
              patch('provision.macos.configure_firewall') as mock_firewall:
             
             from provision.steps import configure_security
@@ -223,7 +223,7 @@ class TestSecurityConfiguration:
         mock_platform.return_value = 'Darwin'
         
         with patch('provision.macos.manage_filevault') as mock_filevault, \
-             patch('provision.macos.disable_ssh') as mock_ssh, \
+             patch('provision.macos.enable_ssh') as mock_ssh, \
              patch('provision.macos.configure_firewall') as mock_firewall:
             
             from provision.steps import configure_security
@@ -241,7 +241,7 @@ class TestSecurityConfiguration:
         mock_platform.return_value = 'Darwin'
         
         with patch('provision.macos.manage_filevault') as mock_filevault, \
-             patch('provision.macos.disable_ssh') as mock_ssh, \
+             patch('provision.macos.enable_ssh') as mock_ssh, \
              patch('provision.macos.configure_firewall') as mock_firewall:
             
             from provision.steps import configure_security

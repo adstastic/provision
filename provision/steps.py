@@ -79,13 +79,13 @@ def configure_security(dry_run: bool = False, user_only: bool = False) -> None:
         log_info("Configuring security settings for macOS...")
         
         # Import security functions
-        from provision.macos import manage_filevault, disable_ssh, configure_firewall
-        
+        from provision.macos import manage_filevault, enable_ssh, configure_firewall
+
         # Manage FileVault
         manage_filevault(dry_run=dry_run)
-        
-        # Disable standard SSH
-        disable_ssh(dry_run=dry_run)
+
+        # Enable SSH for pre-boot FileVault unlock
+        enable_ssh(dry_run=dry_run)
         
         # Configure firewall
         configure_firewall(dry_run=dry_run)

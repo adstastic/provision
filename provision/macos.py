@@ -119,9 +119,13 @@ def get_tailscaled_path() -> Optional[str]:
 
 def install_tailscale_daemon(dry_run: bool = False) -> None:
     """Install Tailscale as a system daemon."""
-    daemon_plist = Path("/Library/LaunchDaemons/com.tailscale.tailscaled.plist")
-    
-    if daemon_plist.exists():
+    # Check both possible plist names (source build vs Homebrew)
+    daemon_plists = [
+        Path("/Library/LaunchDaemons/com.tailscale.tailscaled.plist"),
+        Path("/Library/LaunchDaemons/homebrew.mxcl.tailscale.plist"),
+    ]
+
+    if any(p.exists() for p in daemon_plists):
         log_info("Tailscale system daemon is already installed.")
         return
     
@@ -303,41 +307,51 @@ def setup_colima_service(dry_run: bool = False) -> None:
 
 
 def manage_filevault(dry_run: bool = False) -> None:
-    """Manage FileVault - disable it for headless boot capability."""
+    """Ensure FileVault is enabled for disk encryption.
+
+    macOS Tahoe supports remote FileVault unlock via SSH over wired Ethernet,
+    so we keep FileVault on for security and rely on the pre-boot SSH daemon
+    for headless unlock.  See: man apple_ssh_and_filevault
+    """
     try:
         # Check FileVault status
         status_output = str(sh.sudo.fdesetup("status"))
-        
+
         if "FileVault is On" in status_output:
-            if dry_run:
-                log_action("[DRY RUN] Would disable FileVault")
-                return
-            
-            log_action("FileVault is enabled. Disabling for headless boot...")
-            sh.sudo.fdesetup("disable")
+            log_info("FileVault is already enabled.")
         else:
-            log_info("FileVault is already disabled.")
+            if dry_run:
+                log_action("[DRY RUN] Would enable FileVault")
+                return
+
+            log_action("FileVault is disabled. Enabling...")
+            sh.sudo.fdesetup("enable")
     except Exception as e:
         log_action(f"Failed to manage FileVault: {e}")
 
 
-def disable_ssh(dry_run: bool = False) -> None:
-    """Disable standard SSH (Remote Login) service."""
+def enable_ssh(dry_run: bool = False) -> None:
+    """Enable Remote Login (SSH) for pre-boot FileVault unlock.
+
+    macOS Tahoe runs a minimal SSH daemon before the data volume is unlocked,
+    accepting password auth over wired Ethernet.  After unlock, Tailscale SSH
+    takes over for day-to-day access.  See: man apple_ssh_and_filevault
+    """
     try:
         # Check SSH status
         status_output = str(sh.sudo.systemsetup("-getremotelogin"))
-        
+
         if "Remote Login: On" in status_output:
-            if dry_run:
-                log_action("[DRY RUN] Would disable SSH (Remote Login)")
-                return
-            
-            log_action("Standard SSH (Remote Login) is enabled. Disabling...")
-            sh.sudo.systemsetup("-setremotelogin", "off")
+            log_info("Remote Login (SSH) is already enabled.")
         else:
-            log_info("Standard SSH (Remote Login) is already disabled.")
+            if dry_run:
+                log_action("[DRY RUN] Would enable Remote Login (SSH)")
+                return
+
+            log_action("Enabling Remote Login (SSH) for pre-boot FileVault unlock...")
+            sh.sudo.systemsetup("-setremotelogin", "on")
     except Exception as e:
-        log_action(f"Failed to disable SSH: {e}")
+        log_action(f"Failed to enable SSH: {e}")
 
 
 def configure_firewall(dry_run: bool = False) -> None:

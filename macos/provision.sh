@@ -5,14 +5,22 @@
 # This script can be run multiple times. It checks the current state of
 # the system before making any changes.
 #
+# Remote access strategy (macOS Tahoe):
+#   - FileVault stays ENABLED for security.
+#   - Remote Login (SSH) is ENABLED so the pre-boot SSH daemon can accept
+#     connections over wired Ethernet before FileVault is unlocked.
+#     See: man apple_ssh_and_filevault
+#   - After unlock, Tailscale starts as a system daemon and provides
+#     encrypted access (SSH, Screen Sharing) over the tailnet.
+#
 # This script will:
 # - Install Homebrew and essential tools (Go, tmux, Colima).
 # - Compile and install Tailscale from source.
 # - Configure Tailscale to run as a system daemon on boot.
 # - Configure tmux to run as a background service.
 # - Configure Colima (Docker runtime) to run as a background service.
-# - Disable FileVault to allow boot without physical login.
-# - Disable the standard macOS SSH server for better security.
+# - Ensure FileVault is enabled for disk encryption.
+# - Enable Remote Login (SSH) for pre-boot FileVault unlock.
 # - Enable the macOS Firewall with Stealth Mode and configure exceptions.
 # - Enable Screen Sharing (VNC) and other continuity services.
 # - Disable all sleep settings to ensure the machine is always online.
@@ -106,7 +114,8 @@ log_info "Using tailscaled found at: $TAILSCALED_PATH"
 
 log_info "Checking Tailscale system daemon..."
 DAEMON_PLIST="/Library/LaunchDaemons/com.tailscale.tailscaled.plist"
-if [ ! -f "$DAEMON_PLIST" ]; then
+DAEMON_PLIST_BREW="/Library/LaunchDaemons/homebrew.mxcl.tailscale.plist"
+if [ ! -f "$DAEMON_PLIST" ] && [ ! -f "$DAEMON_PLIST_BREW" ]; then
     log_action "Tailscale system daemon not found. Installing..."
     sudo "$TAILSCALED_PATH" install-system-daemon
 else
@@ -229,20 +238,23 @@ fi
 # --- Configure System Security and Access ---
 log_info "Checking security settings..."
 
-# FileVault Check
+# FileVault Check — keep enabled for disk encryption.
+# macOS Tahoe supports remote FileVault unlock via SSH over wired Ethernet.
 if sudo fdesetup status | grep -q "FileVault is On."; then
-    log_action "FileVault is enabled. Disabling for headless boot..."
-    sudo fdesetup disable
+    log_info "FileVault is enabled."
 else
-    log_info "FileVault is already disabled."
+    log_action "FileVault is disabled. Enabling..."
+    sudo fdesetup enable
 fi
 
-# Remote Login (SSH) Check
+# Remote Login (SSH) — required for pre-boot FileVault unlock on macOS Tahoe.
+# A minimal SSH daemon runs before the data volume is unlocked, accepting
+# password auth over wired Ethernet. After unlock, Tailscale SSH takes over.
 if sudo systemsetup -getremotelogin | grep -q "On"; then
-    log_action "Standard SSH (Remote Login) is enabled. Disabling..."
-    sudo systemsetup -setremotelogin off
+    log_info "Remote Login (SSH) is already enabled."
 else
-    log_info "Standard SSH (Remote Login) is already disabled."
+    log_action "Enabling Remote Login (SSH) for pre-boot FileVault unlock..."
+    sudo systemsetup -setremotelogin on
 fi
 
 # Firewall Check
