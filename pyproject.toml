@@ -1,0 +1,27 @@
+[project]
+name = "provision"
+version = "0.1.0"
+description = "A clean, modular system provisioning tool"
+readme = "README.md"
+authors = [
+    { name = "adi", email = "hi@adim.in" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0.2",
+    "sh>=2.2.2",
+    "typer>=0.16.0",
+]
+
+[project.scripts]
+provision = "provision.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-mock>=3.14.1",
+]

@@ -3,11 +3,13 @@
 Configure a macOS machine for headless server operation.
 
 ## What it does
-- Installs Dependencies: Homebrew and Go.
+- Installs Dependencies: Homebrew, Go, tmux, and Colima.
 - Installs Tailscale: Compiles tailscale and the tailscaled daemon from source.
 - Configures for Headless Boot:
   - Disables FileVault to allow unattended reboots.
   - Configures tailscaled to run as a system daemon.
+  - Configures tmux to run as a background service with a persistent "main" session.
+  - Configures Colima (Docker runtime) to run as a background service.
 - Hardens Security:
   - Disables the standard macOS SSH server (Remote Login).
   - Enables the macOS Firewall with Stealth Mode.
