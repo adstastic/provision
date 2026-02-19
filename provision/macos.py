@@ -33,7 +33,7 @@ def install_brewfile_packages(brewfile_path: Union[str, Path], dry_run: bool = F
     if dry_run:
         log_action(f"[DRY RUN] Would install packages from {brewfile_path}")
         return
-    
+
     log_action("Installing packages from Brewfile...")
     sh.brew("bundle", f"--file={brewfile_path}")
 
@@ -47,8 +47,8 @@ def get_installed_tailscale_version() -> Optional[str]:
     """Get the installed Tailscale version."""
     try:
         output = str(sh.tailscale("version"))
-        # Parse version from output like "other/third/v1.58.2-t1234567890a"
-        match = re.search(r'/v(\d+\.\d+\.\d+)', output)
+        # First line is the version, e.g. "1.90.4"
+        match = re.search(r'(\d+\.\d+\.\d+)', output)
         if match:
             return match.group(1)
         return None
@@ -104,9 +104,12 @@ def install_tailscale(dry_run: bool = False) -> None:
     # Get GOPATH and update PATH
     gopath = str(sh.go("env", "GOPATH")).strip()
     os.environ['PATH'] = f"{os.environ.get('PATH', '')}:{gopath}/bin"
-    
+
     # Install both tailscale and tailscaled
     sh.go("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+
+    version = get_installed_tailscale_version()
+    log_info(f"Tailscale {version or 'unknown'} installed successfully.")
 
 
 def get_tailscaled_path() -> Optional[str]:
@@ -209,7 +212,7 @@ def setup_tmux_service(dry_run: bool = False) -> None:
     launch_agents_dir = Path(real_home) / "Library" / "LaunchAgents"
     if not launch_agents_dir.exists():
         log_action("Creating LaunchAgents directory...")
-        sh.sudo("-u", real_user, "mkdir", "-p", str(launch_agents_dir))
+        launch_agents_dir.mkdir(parents=True, exist_ok=True)
     
     # Get tmux binary path
     try:
@@ -231,12 +234,8 @@ def setup_tmux_service(dry_run: bool = False) -> None:
         
         plist_content = plist_content.replace("TMUX_PATH_PLACEHOLDER", tmux_path)
         
-        # Write plist file as the real user
         with open(plist_path, 'w') as f:
             f.write(plist_content)
-        
-        # Set proper ownership
-        sh.sudo("chown", f"{real_user}:staff", str(plist_path))
     else:
         log_info("tmux service plist already exists.")
     
@@ -245,7 +244,7 @@ def setup_tmux_service(dry_run: bool = False) -> None:
         launchctl_list = str(sh.launchctl("list"))
         if "com.tmux.main" not in launchctl_list:
             log_action("Loading tmux service...")
-            sh.sudo("-u", real_user, "launchctl", "load", str(plist_path))
+            sh.launchctl("load", str(plist_path))
             log_info("tmux service loaded successfully.")
         else:
             log_info("tmux service is already loaded.")
@@ -484,7 +483,7 @@ def configure_power_management(dry_run: bool = False) -> None:
         # Apply changes
         for setting_name, log_message in changes_needed:
             log_action(log_message)
-            sh.pmset("-a", setting_name, "0")
+            sh.sudo.pmset("-a", setting_name, "0")
         
         log_info("Power settings configured to prevent sleep.")
         
@@ -528,6 +527,75 @@ def verify_docker_stack() -> None:
         log_action("Colima is not running. Docker commands will fail until Colima is started.")
         log_action("The LaunchAgent may have failed to start Colima automatically.")
         log_action("Try running 'colima start' manually to start the Docker runtime.")
+
+
+def discover_runner_dirs() -> list[Path]:
+    """Discover GitHub Actions runner directories under /Users/ci/."""
+    return sorted(
+        p.parent for p in Path("/Users/ci").glob("actions-runner-*/.runner")
+    )
+
+
+def install_runner_daemons(dry_run: bool = False) -> None:
+    """Install GitHub Actions runners as LaunchDaemons for boot-level execution."""
+    runner_dirs = discover_runner_dirs()
+    if not runner_dirs:
+        log_info("No GitHub Actions runner directories found.")
+        return
+
+    for runner_dir in runner_dirs:
+        _install_one_runner_daemon(runner_dir, dry_run)
+
+
+def _install_one_runner_daemon(runner_dir: Path, dry_run: bool) -> None:
+    """Install a single runner as a LaunchDaemon."""
+    # Read .runner config
+    runner_config = json.loads((runner_dir / ".runner").read_text(encoding="utf-8-sig"))
+    agent_name = runner_config["agentName"]
+    github_url = runner_config["gitHubUrl"]  # e.g. https://github.com/familiar-ai
+    org = github_url.rstrip("/").split("/")[-1]
+    svc_name = f"actions.runner.{org}.{agent_name}"
+
+    plist_dest = Path(f"/Library/LaunchDaemons/{svc_name}.plist")
+
+    # Idempotent: skip if plist already exists
+    if plist_dest.exists():
+        log_info(f"{svc_name}: plist already installed, skipping.")
+        return
+
+    if dry_run:
+        log_action(f"[DRY RUN] Would install LaunchDaemon for {svc_name}")
+        return
+
+    log_action(f"Installing LaunchDaemon for {svc_name}...")
+
+    # Copy bin/runsvc.sh → runsvc.sh if missing (mirrors svc.sh install behaviour)
+    root_runsvc = runner_dir / "runsvc.sh"
+    if not root_runsvc.exists():
+        src = runner_dir / "bin" / "runsvc.sh"
+        log_action(f"Copying {src} → {root_runsvc}")
+        sh.sudo.cp("-p", str(src), str(root_runsvc))
+        sh.sudo.chmod("755", str(root_runsvc))
+
+    # Create log directory
+    log_dir = Path(f"/Users/ci/Library/Logs/{svc_name}")
+    sh.sudo.mkdir("-p", str(log_dir))
+    sh.sudo.chown("ci:staff", str(log_dir))
+
+    # Render plist from template
+    template_path = runner_dir / "bin" / "actions.runner.plist.template"
+    plist_content = template_path.read_text()
+    plist_content = plist_content.replace("{{User}}", "ci")
+    plist_content = plist_content.replace("{{SvcName}}", svc_name)
+    plist_content = plist_content.replace("{{RunnerRoot}}", str(runner_dir))
+    plist_content = plist_content.replace("{{UserHome}}", "/Users/ci")
+
+    # Write plist to /Library/LaunchDaemons/ (requires sudo)
+    sh.sudo.tee(str(plist_dest), _in=plist_content)
+
+    # Load the daemon
+    sh.sudo.launchctl("load", "-w", str(plist_dest))
+    log_info(f"{svc_name} installed and loaded.")
 
 
 def verify_tailscale_connectivity() -> bool:

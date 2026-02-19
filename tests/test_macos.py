@@ -1,4 +1,5 @@
 """Tests for macOS-specific provisioning functions."""
+import json
 import pytest
 from unittest.mock import patch, MagicMock, call
 import sh
@@ -7,7 +8,8 @@ from pathlib import Path
 from provision.macos import (
     check_homebrew, install_homebrew, install_brewfile_packages,
     check_tailscale, get_installed_tailscale_version, get_latest_tailscale_version,
-    is_tailscale_up_to_date, install_tailscale, get_tailscaled_path
+    is_tailscale_up_to_date, install_tailscale, get_tailscaled_path,
+    discover_runner_dirs, install_runner_daemons,
 )
 
 
@@ -463,73 +465,75 @@ class TestTmuxService:
     
     @patch('provision.macos.log_action')
     @patch('provision.macos.log_info')
-    @patch('provision.utils.get_real_user')
-    @patch('provision.utils.get_real_home')
-    @patch('provision.macos.sh.sudo')
+    @patch('provision.macos.get_real_user')
+    @patch('provision.macos.get_real_home')
     @patch('provision.macos.sh.launchctl')
     @patch('provision.macos.sh.which')
     @patch('builtins.open', create=True)
     @patch.object(Path, 'exists')
-    def test_setup_tmux_service_success(self, mock_exists, mock_open, mock_which, 
-                                       mock_launchctl, mock_sudo, mock_get_home,
+    def test_setup_tmux_service_success(self, mock_exists, mock_open, mock_which,
+                                       mock_launchctl, mock_get_home,
                                        mock_get_user, mock_log_info, mock_log_action):
         """Test setting up tmux service when not configured."""
         # Mock user info
         mock_get_user.return_value = "testuser"
         mock_get_home.return_value = "/Users/testuser"
-        
+
         # Mock tmux binary path
         mock_which.return_value = "/opt/homebrew/bin/tmux"
-        
+
         # Mock path exists checks: LaunchAgents dir exists, plist doesn't
         mock_exists.side_effect = [True, False]
-        
+
         # Mock file operations
         mock_file = MagicMock()
         mock_file.read.return_value = "<?xml version=\"1.0\"?>\n<plist><string>TMUX_PATH_PLACEHOLDER</string></plist>"
         mock_file.__enter__.return_value = mock_file
         mock_file.__exit__.return_value = None
         mock_open.return_value = mock_file
-        
+
         # Mock launchctl list
         mock_launchctl.list.return_value = "com.apple.Finder\ncom.apple.Dock"  # tmux not in list
-        
+
         from provision.macos import setup_tmux_service
         setup_tmux_service(dry_run=False)
-        
+
         # Should create plist file and load service
         mock_log_action.assert_any_call("Creating tmux service plist...")
-        # Verify launchctl load was called
-        assert any(call for call in mock_sudo.call_args_list 
-                  if len(call[0]) >= 4 and call[0][2] == "launchctl" and call[0][3] == "load")
+        # Verify launchctl load was called with the plist path
+        mock_launchctl.assert_any_call("load", str(Path("/Users/testuser/Library/LaunchAgents/com.tmux.main.plist")))
     
     @patch('provision.macos.log_info')
-    @patch('provision.utils.get_real_user')
-    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.get_real_user')
+    @patch('provision.macos.get_real_home')
     @patch('provision.macos.sh.launchctl')
+    @patch('provision.macos.sh.which')
     @patch.object(Path, 'exists')
-    def test_setup_tmux_service_already_exists(self, mock_exists, mock_launchctl,
+    def test_setup_tmux_service_already_exists(self, mock_exists, mock_which, mock_launchctl,
                                               mock_get_home, mock_get_user, mock_log_info):
         """Test tmux service setup when already configured (idempotency)."""
         # Mock user info
         mock_get_user.return_value = "testuser"
         mock_get_home.return_value = "/Users/testuser"
-        
+
+        # Mock tmux binary path
+        mock_which.return_value = "/opt/homebrew/bin/tmux"
+
         # Mock paths - both LaunchAgents dir and plist exist
         mock_exists.side_effect = [True, True]
-        
+
         # Mock launchctl list - tmux already loaded
         mock_launchctl.list.return_value = "com.tmux.main\ncom.apple.Finder"
-        
+
         from provision.macos import setup_tmux_service
         setup_tmux_service(dry_run=False)
-        
+
         # Should detect service is already configured
         assert any("already" in str(call) for call in mock_log_info.call_args_list)
     
     @patch('provision.macos.log_action')
-    @patch('provision.utils.get_real_user')
-    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.get_real_user')
+    @patch('provision.macos.get_real_home')
     def test_setup_tmux_service_dry_run(self, mock_get_home, mock_get_user, mock_log_action):
         """Test tmux service setup in dry-run mode."""
         # Mock user info
@@ -542,18 +546,22 @@ class TestTmuxService:
         # Should show dry-run message
         mock_log_action.assert_called_with("[DRY RUN] Would setup tmux service")
     
-    @patch('provision.utils.get_real_user')
-    @patch('provision.utils.get_real_home')
+    @patch('provision.macos.get_real_user')
+    @patch('provision.macos.get_real_home')
     @patch('provision.macos.sh.which')
-    def test_setup_tmux_service_no_tmux_binary(self, mock_which, mock_get_home, mock_get_user):
+    @patch.object(Path, 'exists')
+    def test_setup_tmux_service_no_tmux_binary(self, mock_exists, mock_which, mock_get_home, mock_get_user):
         """Test tmux service setup when tmux binary not found."""
         # Mock user info
         mock_get_user.return_value = "testuser"
         mock_get_home.return_value = "/Users/testuser"
-        
+
+        # Mock LaunchAgents dir exists
+        mock_exists.return_value = True
+
         # Mock no tmux binary
         mock_which.side_effect = Exception("Command not found")
-        
+
         from provision.macos import setup_tmux_service
         with pytest.raises(RuntimeError, match="tmux binary not found"):
             setup_tmux_service(dry_run=False)
@@ -564,7 +572,7 @@ class TestColimaService:
     
     @patch('provision.macos.log_action')
     @patch('provision.macos.log_info')
-    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.get_real_user')
     @patch('provision.macos.sh.brew')
     @patch('provision.macos.sh.colima')
     @patch('time.sleep')
@@ -591,7 +599,7 @@ class TestColimaService:
         mock_services.start.assert_called_once_with("colima")
     
     @patch('provision.macos.log_info')
-    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.get_real_user')
     @patch('provision.macos.sh.brew')
     def test_setup_colima_service_already_running(self, mock_brew, mock_get_user, mock_log_info):
         """Test Colima service setup when already running (idempotency)."""
@@ -610,7 +618,7 @@ class TestColimaService:
         mock_log_info.assert_called_with("Colima service is already running.")
     
     @patch('provision.macos.log_action')
-    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.get_real_user')
     def test_setup_colima_service_dry_run(self, mock_get_user, mock_log_action):
         """Test Colima service setup in dry-run mode."""
         # Mock user info
@@ -623,7 +631,7 @@ class TestColimaService:
         mock_log_action.assert_called_with("[DRY RUN] Would setup Colima service")
     
     @patch('provision.macos.log_action')
-    @patch('provision.utils.get_real_user')
+    @patch('provision.macos.get_real_user')
     @patch('provision.macos.command_exists')
     @patch('provision.macos.os.environ.get')
     @patch('provision.macos.sh.brew')
@@ -938,30 +946,24 @@ class TestPowerManagement:
     
     @patch('provision.macos.log_action')
     @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
     @patch('provision.macos.sh.pmset')
-    def test_configure_power_management_when_sleep_enabled(self, mock_pmset, mock_log_info, mock_log_action):
+    def test_configure_power_management_when_sleep_enabled(self, mock_pmset, mock_sudo, mock_log_info, mock_log_action):
         """Test disabling sleep settings when they are enabled."""
-        # Mock pmset -g output showing sleep is enabled
-        mock_pmset.side_effect = [
-            # First call: pmset -g
-            " sleep                10 (sleep prevented by 0)\n disksleep            10\n powernap             1",
-            # Subsequent calls for setting values
-            "",  # pmset -a sleep 0
-            "",  # pmset -a disksleep 0
-            "",  # pmset -a powernap 0
-        ]
-        
+        # Mock pmset -g output (read, no sudo)
+        mock_pmset.return_value = " sleep                10 (sleep prevented by 0)\n disksleep            10\n powernap             1"
+
         from provision.macos import configure_power_management
         configure_power_management(dry_run=False)
-        
-        # Should check current settings
-        assert mock_pmset.call_args_list[0] == call("-g")
-        
-        # Should set all three settings to 0
-        assert mock_pmset.call_args_list[1] == call("-a", "sleep", "0")
-        assert mock_pmset.call_args_list[2] == call("-a", "disksleep", "0")
-        assert mock_pmset.call_args_list[3] == call("-a", "powernap", "0")
-        
+
+        # Should check current settings without sudo
+        mock_pmset.assert_called_once_with("-g")
+
+        # Should set all three settings via sudo
+        mock_sudo.pmset.assert_any_call("-a", "sleep", "0")
+        mock_sudo.pmset.assert_any_call("-a", "disksleep", "0")
+        mock_sudo.pmset.assert_any_call("-a", "powernap", "0")
+
         # Should log actions
         mock_log_action.assert_any_call("Disabling system sleep...")
         mock_log_action.assert_any_call("Disabling disk sleep...")
@@ -1003,27 +1005,22 @@ class TestPowerManagement:
     
     @patch('provision.macos.log_action')
     @patch('provision.macos.log_info')
+    @patch('provision.macos.sh.sudo')
     @patch('provision.macos.sh.pmset')
-    def test_configure_power_management_partial_settings(self, mock_pmset, mock_log_info, mock_log_action):
+    def test_configure_power_management_partial_settings(self, mock_pmset, mock_sudo, mock_log_info, mock_log_action):
         """Test power management when only some settings need to be changed."""
         # Mock pmset -g output showing mixed state
-        mock_pmset.side_effect = [
-            # First call: pmset -g
-            " sleep                0 (sleep prevented by 0)\n disksleep            10\n powernap             0",
-            # Only disksleep needs to be set
-            "",  # pmset -a disksleep 0
-        ]
-        
+        mock_pmset.return_value = " sleep                0 (sleep prevented by 0)\n disksleep            10\n powernap             0"
+
         from provision.macos import configure_power_management
         configure_power_management(dry_run=False)
-        
-        # Should check current settings
-        assert mock_pmset.call_args_list[0] == call("-g")
-        
-        # Should only set disksleep (the one that's not 0)
-        assert len(mock_pmset.call_args_list) == 2
-        assert mock_pmset.call_args_list[1] == call("-a", "disksleep", "0")
-        
+
+        # Should check current settings without sudo
+        mock_pmset.assert_called_once_with("-g")
+
+        # Should only set disksleep via sudo (the one that's not 0)
+        mock_sudo.pmset.assert_called_once_with("-a", "disksleep", "0")
+
         # Should only log action for the setting that was changed
         mock_log_action.assert_called_once_with("Disabling disk sleep...")
 
@@ -1214,3 +1211,242 @@ class TestTailscaleConnectivityCheck:
         
         # Should log error
         assert any("Failed to check Tailscale status" in str(call) for call in mock_log_info.call_args_list)
+
+
+PLIST_TEMPLATE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{{SvcName}}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>{{RunnerRoot}}/runsvc.sh</string>
+    </array>
+    <key>UserName</key>
+    <string>{{User}}</string>
+    <key>WorkingDirectory</key>
+    <string>{{RunnerRoot}}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{{UserHome}}/Library/Logs/{{SvcName}}/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{UserHome}}/Library/Logs/{{SvcName}}/stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>ACTIONS_RUNNER_SVC</key>
+      <string>1</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>SessionCreate</key>
+    <true/>
+  </dict>
+</plist>
+"""
+
+RUNNER_JSON = '{"agentId":137,"agentName":"iron0","poolId":1,"poolName":"Default",' \
+              '"serverUrl":"https://pipelines.actions.githubusercontent.com/",' \
+              '"gitHubUrl":"https://github.com/familiar-ai",' \
+              '"workFolder":"_work","useV2Flow":true}'
+
+
+class TestRunnerDiscovery:
+    """Tests for GitHub Actions runner directory discovery."""
+
+    @patch('provision.macos.Path')
+    def test_discover_runner_dirs(self, mock_path_cls):
+        """Test discovering runner directories from .runner files."""
+        # Create mock paths for the glob results
+        runner0 = Path("/Users/ci/actions-runner-0/.runner")
+        runner1 = Path("/Users/ci/actions-runner-1/.runner")
+
+        mock_ci = MagicMock()
+        mock_ci.glob.return_value = [runner0, runner1]
+        mock_path_cls.return_value = mock_ci
+
+        dirs = discover_runner_dirs()
+
+        mock_path_cls.assert_called_once_with("/Users/ci")
+        mock_ci.glob.assert_called_once_with("actions-runner-*/.runner")
+        assert dirs == [
+            Path("/Users/ci/actions-runner-0"),
+            Path("/Users/ci/actions-runner-1"),
+        ]
+
+    @patch('provision.macos.Path')
+    def test_discover_runner_dirs_none_found(self, mock_path_cls):
+        """Test discovery when no runners exist."""
+        mock_ci = MagicMock()
+        mock_ci.glob.return_value = []
+        mock_path_cls.return_value = mock_ci
+
+        dirs = discover_runner_dirs()
+        assert dirs == []
+
+
+class TestRunnerDaemonInstallation:
+    """Tests for GitHub Actions runner LaunchDaemon installation."""
+
+    def _make_runner_fs(self, tmp_path, agent_name="iron0", has_root_runsvc=True):
+        """Helper to create a fake runner directory."""
+        runner_dir = tmp_path / "actions-runner-0"
+        runner_dir.mkdir()
+
+        # .runner config
+        config = {
+            "agentId": 137,
+            "agentName": agent_name,
+            "gitHubUrl": "https://github.com/familiar-ai",
+            "workFolder": "_work",
+        }
+        (runner_dir / ".runner").write_text(json.dumps(config))
+
+        # bin/ with template and runsvc.sh
+        bin_dir = runner_dir / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "actions.runner.plist.template").write_text(PLIST_TEMPLATE)
+        (bin_dir / "runsvc.sh").write_text("#!/bin/bash\n# runner service\n")
+
+        if has_root_runsvc:
+            (runner_dir / "runsvc.sh").write_text("#!/bin/bash\n# runner service\n")
+
+        return runner_dir
+
+    @patch('provision.macos.sh')
+    def test_install_runner_daemon_success(self, mock_sh, tmp_path):
+        """Test installing a runner daemon end-to-end."""
+        runner_dir = self._make_runner_fs(tmp_path)
+        svc_name = "actions.runner.familiar-ai.iron0"
+        plist_path = f"/Library/LaunchDaemons/{svc_name}.plist"
+        log_path = f"/Users/ci/Library/Logs/{svc_name}"
+
+        plist_dest = MagicMock()
+        plist_dest.exists.return_value = False
+
+        with patch('provision.macos.discover_runner_dirs', return_value=[runner_dir]), \
+             patch('provision.macos.Path') as mock_path_cls:
+
+            def path_side_effect(arg):
+                if arg == plist_path:
+                    return plist_dest
+                return Path(arg)
+
+            mock_path_cls.side_effect = path_side_effect
+            install_runner_daemons(dry_run=False)
+
+        # Verify plist was written via sudo tee with correct content
+        mock_sh.sudo.tee.assert_called_once()
+        tee_args, tee_kwargs = mock_sh.sudo.tee.call_args
+        assert tee_args[0] == str(plist_dest)
+        plist_content = tee_kwargs["_in"]
+        assert svc_name in plist_content
+        assert str(runner_dir) in plist_content
+        assert "<string>ci</string>" in plist_content
+        assert "/Users/ci" in plist_content
+        assert "{{" not in plist_content
+
+        # Verify log dir created and owned by ci
+        mock_sh.sudo.mkdir.assert_called_once_with("-p", log_path)
+        mock_sh.sudo.chown.assert_called_once_with("ci:staff", log_path)
+
+        # Verify launchctl load was called
+        mock_sh.sudo.launchctl.assert_called_once_with(
+            "load", "-w", str(plist_dest)
+        )
+
+    @patch('provision.macos.sh')
+    def test_install_runner_copies_missing_runsvc(self, mock_sh, tmp_path):
+        """Test that missing runsvc.sh gets copied from bin/."""
+        runner_dir = self._make_runner_fs(tmp_path, has_root_runsvc=False)
+        svc_name = "actions.runner.familiar-ai.iron0"
+        plist_path = f"/Library/LaunchDaemons/{svc_name}.plist"
+
+        plist_dest = MagicMock()
+        plist_dest.exists.return_value = False
+
+        assert not (runner_dir / "runsvc.sh").exists()
+
+        with patch('provision.macos.discover_runner_dirs', return_value=[runner_dir]), \
+             patch('provision.macos.Path') as mock_path_cls:
+
+            def path_side_effect(arg):
+                if arg == plist_path:
+                    return plist_dest
+                return Path(arg)
+
+            mock_path_cls.side_effect = path_side_effect
+            install_runner_daemons(dry_run=False)
+
+        # runsvc.sh should have been copied via sudo cp
+        mock_sh.sudo.cp.assert_called_once_with(
+            "-p", str(runner_dir / "bin" / "runsvc.sh"), str(runner_dir / "runsvc.sh")
+        )
+        mock_sh.sudo.chmod.assert_called_once_with(
+            "755", str(runner_dir / "runsvc.sh")
+        )
+
+    @patch('provision.macos.log_info')
+    @patch('provision.macos.sh')
+    def test_install_runner_idempotent_skips_existing(self, mock_sh, mock_log_info, tmp_path):
+        """Test that existing plist is skipped (idempotency)."""
+        runner_dir = self._make_runner_fs(tmp_path)
+        plist_path = "/Library/LaunchDaemons/actions.runner.familiar-ai.iron0.plist"
+
+        plist_dest = MagicMock()
+        plist_dest.exists.return_value = True  # already installed
+
+        with patch('provision.macos.discover_runner_dirs', return_value=[runner_dir]), \
+             patch('provision.macos.Path') as mock_path_cls:
+
+            def path_side_effect(arg):
+                if arg == plist_path:
+                    return plist_dest
+                return Path(arg)
+
+            mock_path_cls.side_effect = path_side_effect
+            install_runner_daemons(dry_run=False)
+
+        # Should not call launchctl
+        mock_sh.sudo.launchctl.assert_not_called()
+
+        # Should log skip message
+        assert any("already installed" in str(c) for c in mock_log_info.call_args_list)
+
+    @patch('provision.macos.log_action')
+    @patch('provision.macos.sh')
+    def test_install_runner_dry_run(self, mock_sh, mock_log_action, tmp_path):
+        """Test dry-run mode previews without changes."""
+        runner_dir = self._make_runner_fs(tmp_path)
+        plist_path = "/Library/LaunchDaemons/actions.runner.familiar-ai.iron0.plist"
+
+        plist_dest = MagicMock()
+        plist_dest.exists.return_value = False
+
+        with patch('provision.macos.discover_runner_dirs', return_value=[runner_dir]), \
+             patch('provision.macos.Path') as mock_path_cls:
+
+            def path_side_effect(arg):
+                if arg == plist_path:
+                    return plist_dest
+                return Path(arg)
+
+            mock_path_cls.side_effect = path_side_effect
+            install_runner_daemons(dry_run=True)
+
+        # Should not write plist or call launchctl
+        mock_sh.sudo.tee.assert_not_called()
+        mock_sh.sudo.launchctl.assert_not_called()
+
+        # Should log dry-run message
+        assert any("[DRY RUN]" in str(c) for c in mock_log_action.call_args_list)
+
+    @patch('provision.macos.log_info')
+    def test_install_runner_no_runners_found(self, mock_log_info):
+        """Test graceful handling when no runner dirs found."""
+        with patch('provision.macos.discover_runner_dirs', return_value=[]):
+            install_runner_daemons(dry_run=False)
+
+        mock_log_info.assert_called_once_with("No GitHub Actions runner directories found.")

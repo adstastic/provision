@@ -1,5 +1,5 @@
 """
-Provision - A clean, modular system provisioning tool.
+mm - macOS management CLI.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

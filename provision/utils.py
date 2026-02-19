@@ -1,4 +1,5 @@
 """Utility functions for the provisioning tool."""
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -37,8 +38,26 @@ def log_action(message: str) -> None:
     print(f"  -> {message}")
 
 
+class _ShFilter(logging.Filter):
+    """Extract just the command from sh's verbose log messages."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        import re
+        m = re.search(r"<Command '(.+?)'", record.getMessage())
+        if m:
+            record.msg = m.group(1)
+            record.args = ()
+        return True
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Setup logging configuration."""
-    # In the future, this could configure Python logging
-    # For now, it's a placeholder that accepts the verbose flag
-    pass
+    sh_logger = logging.getLogger("sh")
+    if verbose:
+        sh_logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("  [sh] %(message)s"))
+        handler.addFilter(_ShFilter())
+        sh_logger.addHandler(handler)
+    else:
+        sh_logger.setLevel(logging.WARNING)
