@@ -1,5 +1,3 @@
-"""
-Provision - A clean, modular system provisioning tool.
-"""
+"""mm - Mac Mini management CLI."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

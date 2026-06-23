@@ -1,33 +1,15 @@
-# BACKLOG.md - Provisioning Tool Development
+# BACKLOG
 
-## Foundation
-- [x] Project setup and core utilities
-- [x] Basic CLI structure
+## Now
+- [x] Replace duplicated shell/Python provisioning with one `mm` CLI
+- [x] Record durable access/isolation claims in `.phoenix/graph.md`
+- [x] Make mutation dry-run by default and gated by `--apply`
+- [x] Add `status`, `provision`, `harden`, `screen`, and `runners` commands
+- [x] Remove runtime dependencies (`typer`, `sh`, `pyyaml`)
+- [x] Replace over-mocked tests with plan/policy tests
 
-## Phase 1: Dependency Installation
-- [x] Homebrew installation check
-- [x] Brewfile package installation
-
-## Phase 2: Tailscale Setup
-- [x] Tailscale binary detection
-- [x] Tailscale version checking (compare with GitHub releases)
-- [x] Tailscale binary installation from source
-- [x] Tailscale daemon configuration
-- [x] DNS configuration for MagicDNS
-
-## Phase 3: Service Configuration
-- [x] tmux service setup
-- [x] Colima (Docker) service setup
-
-## Phase 4: Security Configuration
-- [x] FileVault management
-- [x] SSH disabling
-- [x] Firewall configuration
-
-## Phase 5: System Configuration
-- [x] Screen sharing setup
-- [x] Power management settings
-
-## Phase 6: Verification
-- [x] Docker stack verification
-- [x] Final Tailscale connectivity check
+## Next
+- [ ] Add `mm apps` checks/fixes for LM Studio and VibeTunnel preference-level lockdown
+- [ ] Decide future iOS runner model: removed, disabled-until-needed, or isolated `ci`
+- [ ] Add tailnet-only Screen Sharing enforcement if macOS packet filter rule proves reliable
+- [ ] Add `mm audit` JSON output for machine-readable posture snapshots

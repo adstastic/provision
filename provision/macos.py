@@ -1,550 +1,486 @@
-"""macOS-specific provisioning functions."""
-import sh
-import re
+"""Mac Mini management primitives.
+
+This module owns plans, not opinions hidden in shell glue. Mutating operations are
+small command lists so dry-run and tests see the same thing apply uses.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
-from typing import Union, Optional
-from provision.utils import command_exists, log_info, log_action, get_real_user, get_real_home
+import re
+import shlex
+import socket
+import stat
+import subprocess
+import sys
+from typing import Iterable, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BREWFILE = REPO_ROOT / "macos" / "Brewfile"
+SOCKET_FILTER = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+SCREEN_SHARING_PLIST = "/System/Library/LaunchDaemons/com.apple.screensharing.plist"
+SCREEN_SHARING_BUNDLE = "/System/Library/CoreServices/RemoteManagement/screensharingd.bundle"
+ARD_KICKSTART = "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+SSH_HARDENING_TEMPLATE = """# Managed by mm. Keep SSH for mosh over Tailscale; do not use Tailscale SSH.
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+AllowUsers {ssh_user}
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+GatewayPorts no
+PermitUserEnvironment no
+MaxAuthTries 3
+LoginGraceTime 30
+MaxSessions 10
+LogLevel VERBOSE
+"""
 
 
-def check_homebrew() -> bool:
-    """Check if Homebrew is installed."""
-    return command_exists('brew')
+@dataclass(frozen=True)
+class Command:
+    """One command in a management plan."""
+
+    args: tuple[str, ...]
+    sudo: bool = False
+    note: str = ""
+
+    def argv(self) -> list[str]:
+        if self.sudo:
+            return ["sudo", *self.args]
+        return list(self.args)
+
+    def render(self) -> str:
+        return " ".join(shlex.quote(part) for part in self.argv())
 
 
-def install_homebrew(dry_run: bool = False) -> None:
-    """Install Homebrew if not already installed."""
-    if check_homebrew():
-        log_info("Homebrew is already installed.")
-        return
-    
-    if dry_run:
-        log_action("[DRY RUN] Would install Homebrew")
-        return
-    
-    log_action("Homebrew not found. Installing Homebrew...")
-    install_script = sh.curl("-fsSL", "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh")
-    sh.bash("-c", install_script)
+@dataclass(frozen=True)
+class Check:
+    name: str
+    state: str
+    detail: str = ""
 
 
-def install_brewfile_packages(brewfile_path: Union[str, Path], dry_run: bool = False) -> None:
-    """Install packages from a Brewfile."""
-    if dry_run:
-        log_action(f"[DRY RUN] Would install packages from {brewfile_path}")
-        return
-    
-    log_action("Installing packages from Brewfile...")
-    sh.brew("bundle", f"--file={brewfile_path}")
+def run_plan(commands: Iterable[Command], *, dry_run: bool = True) -> None:
+    commands = list(commands)
+    if not dry_run and any(command.sudo for command in commands):
+        try:
+            subprocess.run(["sudo", "-v"], check=True)
+        except subprocess.CalledProcessError as exc:
+            print("sudo authentication failed; run --apply from an interactive SSH/mosh shell", file=sys.stderr)
+            raise SystemExit(exc.returncode) from exc
+    for command in commands:
+        if command.note:
+            print(f"# {command.note}")
+        print(f"$ {command.render()}")
+        if not dry_run:
+            subprocess.run(command.argv(), check=True)
 
 
-def check_tailscale() -> bool:
-    """Check if Tailscale is installed."""
-    return command_exists('tailscaled')
+def require_safe_user(user: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", user):
+        raise ValueError(f"unsafe macOS account name: {user!r}")
+    return user
 
 
-def get_installed_tailscale_version() -> Optional[str]:
-    """Get the installed Tailscale version."""
-    try:
-        output = str(sh.tailscale("version"))
-        # Parse version from output like "other/third/v1.58.2-t1234567890a"
-        match = re.search(r'/v(\d+\.\d+\.\d+)', output)
-        if match:
-            return match.group(1)
-        return None
-    except Exception:  # sh raises various ErrorReturnCode_X exceptions
-        return None
+def bash(script: str, *, sudo: bool = False, note: str = "") -> Command:
+    return Command(("bash", "-lc", script), sudo=sudo, note=note)
 
 
-def get_latest_tailscale_version() -> Optional[str]:
-    """Get the latest Tailscale version from GitHub."""
-    try:
-        response = str(sh.curl("-s", "https://api.github.com/repos/tailscale/tailscale/releases/latest"))
-        data = json.loads(response)
-        tag = data.get('tag_name', '')
-        # Remove 'v' prefix if present
-        if tag.startswith('v'):
-            return tag[1:]
-        return tag if tag else None
-    except (Exception, json.JSONDecodeError, KeyError):
-        return None
+def provision_plan(*, ssh_user: str = "adi", with_containers: bool = False) -> list[Command]:
+    """Install baseline tools and apply secure baseline.
+
+    Containers are installed by Brewfile but not auto-started unless requested.
+    """
+    commands = [
+        bash(
+            "command -v brew >/dev/null || "
+            "NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
+            note="install Homebrew if missing",
+        ),
+        bash(
+            f"brew=$(command -v brew || true); [ -n \"$brew\" ] || brew=/opt/homebrew/bin/brew; \"$brew\" bundle --file={shlex.quote(str(BREWFILE))}",
+            note="install/update declared packages",
+        ),
+        *harden_plan(ssh_user=ssh_user),
+        *power_plan(),
+    ]
+    if with_containers:
+        commands.append(Command(("brew", "services", "start", "colima"), note="start Colima only when explicitly requested"))
+    return commands
 
 
-def is_tailscale_up_to_date() -> bool:
-    """Check if Tailscale is up to date."""
-    installed = get_installed_tailscale_version()
-    if installed is None:
-        return False
-    
-    latest = get_latest_tailscale_version()
-    if latest is None:
-        # Can't determine latest version, assume current is ok
-        return True
-    
-    return installed == latest
-
-
-def install_tailscale(dry_run: bool = False) -> None:
-    """Install or update Tailscale from source."""
-    if check_tailscale():
-        if is_tailscale_up_to_date():
-            log_info("Tailscale is already installed and up to date.")
-            return
-        else:
-            if dry_run:
-                log_action("[DRY RUN] Would update Tailscale from source")
-                return
-            log_action("Tailscale is outdated. Updating from source...")
+def harden_plan(
+    *,
+    ssh_user: str = "adi",
+    keep_screen_sharing: bool = False,
+    disable_runners: bool = False,
+) -> list[Command]:
+    commands = [
+        *base_security_plan(ssh_user=ssh_user),
+        *firewall_plan(),
+        *disable_file_sharing_plan(),
+        *disable_remote_management_plan(),
+        *app_ingress_plan(),
+        *home_isolation_plan(ssh_user),
+    ]
+    if keep_screen_sharing:
+        commands.extend(screen_sharing_plan(True))
     else:
-        if dry_run:
-            log_action("[DRY RUN] Would install Tailscale from source")
-            return
-        log_action("tailscaled not found. Installing Tailscale from source...")
-    
-    # Get GOPATH and update PATH
-    gopath = str(sh.go("env", "GOPATH")).strip()
-    os.environ['PATH'] = f"{os.environ.get('PATH', '')}:{gopath}/bin"
-    
-    # Install both tailscale and tailscaled
-    sh.go("install", "tailscale.com/cmd/tailscale@main", "tailscale.com/cmd/tailscaled@main")
+        commands.extend(screen_sharing_plan(False))
+    if disable_runners:
+        commands.extend(runner_plan(False))
+    commands.extend(post_harden_gate_plan(allow_screen_sharing=keep_screen_sharing))
+    return commands
 
 
-def get_tailscaled_path() -> Optional[str]:
-    """Get the path to the tailscaled binary."""
+def base_security_plan(*, ssh_user: str) -> list[Command]:
+    ssh_user = require_safe_user(ssh_user)
+    ssh_config = SSH_HARDENING_TEMPLATE.format(ssh_user=ssh_user)
+    script = f"""
+set -euo pipefail
+test -s /Users/{shlex.quote(ssh_user)}/.ssh/authorized_keys || {{ echo 'missing /Users/{ssh_user}/.ssh/authorized_keys'; exit 1; }}
+tailscale_bin=$(command -v tailscale || true)
+[ -n "$tailscale_bin" ] || [ ! -x /opt/homebrew/bin/tailscale ] || tailscale_bin=/opt/homebrew/bin/tailscale
+[ -n "$tailscale_bin" ] || [ ! -x /usr/local/bin/tailscale ] || tailscale_bin=/usr/local/bin/tailscale
+[ -z "$tailscale_bin" ] || "$tailscale_bin" set --ssh=false
+systemsetup -setremotelogin on
+install -d -m 755 /etc/ssh/sshd_config.d
+target=/etc/ssh/sshd_config.d/99-mm-hardening.conf
+backup="$target.bak.$(date +%s)"
+tmp=$(mktemp)
+[ -f "$target" ] && cp "$target" "$backup"
+cat > "$tmp" <<'EOF'
+{ssh_config}EOF
+install -m 644 "$tmp" "$target"
+rm -f "$tmp"
+if ! /usr/sbin/sshd -t; then
+  if [ -f "$backup" ]; then
+    cp "$backup" "$target"
+  else
+    rm -f "$target"
+  fi
+  echo 'invalid sshd config; restored previous config' >&2
+  exit 1
+fi
+launchctl enable system/com.openssh.sshd 2>/dev/null || true
+launchctl kickstart -k system/com.openssh.sshd 2>/dev/null || true
+""".strip()
+    return [bash(script, sudo=True, note="keep SSH on, disable Tailscale SSH, validate key-only SSH config")]
+
+
+def firewall_plan() -> list[Command]:
+    script = f"""
+set -euo pipefail
+sf={shlex.quote(SOCKET_FILTER)}
+"$sf" --setglobalstate on
+"$sf" --setstealthmode on
+"$sf" --setallowsigned off
+"$sf" --setallowsignedapp off
+for app in \
+  /sbin/launchd \
+  /usr/libexec/sshd-session \
+  /usr/bin/ssh \
+  /opt/homebrew/bin/mosh-server \
+  /opt/homebrew/Cellar/mosh/*/bin/mosh-server \
+  /Applications/Tailscale.app \
+  /usr/local/bin/tailscaled \
+  /opt/homebrew/opt/tailscale/bin/tailscaled; do
+  for path in $app; do
+    [ -e "$path" ] || continue
+    "$sf" --add "$path" 2>/dev/null || true
+    "$sf" --unblockapp "$path" 2>/dev/null || true
+  done
+done
+""".strip()
+    return [bash(script, sudo=True, note="firewall on; only SSH/mosh/Tailscale explicitly allowed")]
+
+
+def disable_file_sharing_plan() -> list[Command]:
+    script = r"""
+set -euo pipefail
+sharing -l -f json 2>/dev/null | python3 -c '
+import json, subprocess, sys
+try:
+    shares = json.load(sys.stdin)
+except Exception:
+    shares = {}
+for name in shares:
+    subprocess.run(["sharing", "-r", name], check=False)
+'
+for label in com.apple.smbd com.apple.netbiosd; do
+  launchctl disable "system/$label" 2>/dev/null || true
+  launchctl bootout "system/$label" 2>/dev/null || true
+done
+""".strip()
+    return [bash(script, sudo=True, note="disable SMB/File Sharing and remove sharepoints")]
+
+
+def disable_remote_management_plan() -> list[Command]:
+    script = f"""
+set -euo pipefail
+[ -x {shlex.quote(ARD_KICKSTART)} ] && {shlex.quote(ARD_KICKSTART)} -deactivate -stop 2>/dev/null || true
+for label in com.apple.remotemanagementd com.apple.RemoteDesktop.PrivilegeProxy; do
+  launchctl disable "system/$label" 2>/dev/null || true
+  launchctl bootout "system/$label" 2>/dev/null || true
+done
+systemsetup -setremoteappleevents off 2>/dev/null || true
+""".strip()
+    return [bash(script, sudo=True, note="disable Remote Management / ARD / Remote Apple Events")]
+
+
+def app_ingress_plan() -> list[Command]:
+    script = f"""
+set -euo pipefail
+pkill -x 'vibetunnel' 2>/dev/null || true
+pkill -x 'VibeTunnel' 2>/dev/null || true
+pkill -x 'LM Studio' 2>/dev/null || true
+for port in 4020 1234; do
+  lsof -nP -tiTCP:$port -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
+done
+for app in '/Applications/VibeTunnel.app' '/Applications/LM Studio.app'; do
+  [ -e "$app" ] || continue
+  {shlex.quote(SOCKET_FILTER)} --blockapp "$app" 2>/dev/null || true
+done
+""".strip()
+    return [bash(script, sudo=True, note="stop/block known app ingress: VibeTunnel and LM Studio")]
+
+
+def screen_sharing_plan(enable: bool) -> list[Command]:
+    if enable:
+        script = f"""
+set -euo pipefail
+launchctl enable system/com.apple.screensharing 2>/dev/null || true
+launchctl bootstrap system {shlex.quote(SCREEN_SHARING_PLIST)} 2>/dev/null || true
+launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+{shlex.quote(SOCKET_FILTER)} --add {shlex.quote(SCREEN_SHARING_BUNDLE)} 2>/dev/null || true
+{shlex.quote(SOCKET_FILTER)} --unblockapp {shlex.quote(SCREEN_SHARING_BUNDLE)} 2>/dev/null || true
+""".strip()
+        return [bash(script, sudo=True, note="enable Screen Sharing explicitly")]
+
+    script = f"""
+set -euo pipefail
+launchctl disable system/com.apple.screensharing 2>/dev/null || true
+launchctl bootout system/com.apple.screensharing 2>/dev/null || true
+{shlex.quote(SOCKET_FILTER)} --blockapp {shlex.quote(SCREEN_SHARING_BUNDLE)} 2>/dev/null || true
+""".strip()
+    return [bash(script, sudo=True, note="disable Screen Sharing")]
+
+
+def runner_plan(enable: bool) -> list[Command]:
+    if enable:
+        script = """
+set -euo pipefail
+shopt -s nullglob
+for plist in /Library/LaunchDaemons/actions.runner.*.plist; do
+  label=$(basename "$plist" .plist)
+  launchctl enable "system/$label" 2>/dev/null || true
+  launchctl bootstrap system "$plist" 2>/dev/null || true
+  launchctl kickstart -k "system/$label" 2>/dev/null || true
+done
+""".strip()
+        return [bash(script, sudo=True, note="enable GitHub Actions runners")]
+
+    script = """
+set -euo pipefail
+shopt -s nullglob
+for plist in /Library/LaunchDaemons/actions.runner.*.plist; do
+  label=$(basename "$plist" .plist)
+  launchctl disable "system/$label" 2>/dev/null || true
+  launchctl bootout "system/$label" 2>/dev/null || true
+done
+""".strip()
+    return [bash(script, sudo=True, note="disable GitHub Actions runners")]
+
+
+def post_harden_gate_plan(*, allow_screen_sharing: bool = False) -> list[Command]:
+    blocked_ports = {
+        445: "SMB/File Sharing",
+        3283: "ARD/Remote Management",
+        4020: "VibeTunnel",
+        1234: "LM Studio",
+    }
+    if not allow_screen_sharing:
+        blocked_ports[5900] = "Screen Sharing"
+    ports_json = json.dumps(blocked_ports)
+    script = f"""
+python3 - <<'PY'
+import json, socket, subprocess, sys
+
+blocked_ports = {{int(k): v for k, v in json.loads({ports_json!r}).items()}}
+
+def text(cmd):
     try:
-        return str(sh.which("tailscaled")).strip()
-    except Exception:  # sh raises various ErrorReturnCode_X exceptions
-        return None
+        return subprocess.run(cmd, text=True, capture_output=True, timeout=3, check=False).stdout.strip()
+    except Exception:
+        return ""
+
+def tailscale_cmd():
+    for candidate in ("/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale", "tailscale"):
+        try:
+            result = subprocess.run([candidate, "status", "--json"], text=True, capture_output=True, timeout=3, check=False)
+        except Exception:
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            return candidate, result.stdout
+    return "", ""
+
+ts_cmd, ts_status = tailscale_cmd()
+if not ts_cmd:
+    raise SystemExit("harden gate failed: tailscale CLI/status unavailable")
+try:
+    if json.loads(ts_status).get("Self", {{}}).get("SSH_HostKeys"):
+        raise SystemExit("harden gate failed: Tailscale SSH still enabled")
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"harden gate failed: invalid tailscale status JSON: {{exc}}")
+
+mosh = text(["/usr/bin/which", "mosh-server"])
+if not mosh:
+    raise SystemExit("harden gate failed: mosh-server unavailable")
+
+tail_ip = text([ts_cmd, "ip", "-4"]).splitlines()[0]
+try:
+    with socket.create_connection((tail_ip, 22), timeout=0.6):
+        pass
+except OSError as exc:
+    raise SystemExit(f"harden gate failed: SSH not reachable on tailnet {{tail_ip}}:22: {{exc}}")
+
+hosts = []
+for cmd in (["ipconfig", "getifaddr", "en0"], [ts_cmd, "ip", "-4"]):
+    out = text(cmd)
+    if out:
+        hosts.append(out.splitlines()[0])
+
+failures = []
+for host in hosts:
+    for port, name in blocked_ports.items():
+        try:
+            with socket.create_connection((host, port), timeout=0.4):
+                failures.append(f"{{name}} open on {{host}}:{{port}}")
+        except OSError:
+            pass
+
+if failures:
+    raise SystemExit("harden gate failed: " + "; ".join(failures))
+print("harden gate passed")
+PY
+""".strip()
+    return [bash(script, note="verify hardened ingress is closed")]
 
 
-def install_tailscale_daemon(dry_run: bool = False) -> None:
-    """Install Tailscale as a system daemon."""
-    # Check both possible plist names (source build vs Homebrew)
-    daemon_plists = [
-        Path("/Library/LaunchDaemons/com.tailscale.tailscaled.plist"),
-        Path("/Library/LaunchDaemons/homebrew.mxcl.tailscale.plist"),
+def home_isolation_plan(ssh_user: str) -> list[Command]:
+    ssh_user = require_safe_user(ssh_user)
+    script = f"""
+set -euo pipefail
+chmod 700 /Users/{shlex.quote(ssh_user)}
+[ -d /Users/ci ] && chmod 700 /Users/ci || true
+[ -d /Users/ci ] && find /Users/ci -maxdepth 1 -type d -name 'actions-runner-*' -exec chmod 700 {{}} \\; || true
+[ -d /Users/ci ] && find /Users/ci -path '/Users/ci/actions-runner-*/*' \\( -name '.credentials*' -o -name '.runner' -o -name '.env' -o -name '.path' \\) -exec chmod 600 {{}} \\; || true
+""".strip()
+    return [bash(script, sudo=True, note="isolate adi home and CI runner files")]
+
+
+def power_plan() -> list[Command]:
+    return [
+        bash(
+            "pmset -a sleep 0 disksleep 0 powernap 0",
+            sudo=True,
+            note="keep Mac reachable",
+        )
     ]
 
-    if any(p.exists() for p in daemon_plists):
-        log_info("Tailscale system daemon is already installed.")
-        return
-    
-    if dry_run:
-        log_action("[DRY RUN] Would install Tailscale system daemon")
-        return
-    
-    # Get tailscaled path
-    tailscaled_path = get_tailscaled_path()
-    if not tailscaled_path:
-        raise RuntimeError("tailscaled binary not found")
-    
-    log_action("Tailscale system daemon not found. Installing...")
-    sh.sudo(tailscaled_path, "install-system-daemon")
 
-
-def configure_tailscale_dns(dry_run: bool = False) -> None:
-    """Configure system to use Tailscale MagicDNS."""
-    TAILSCALE_DNS = "100.100.100.100"
-    
-    # Get list of network interfaces
-    hardware_ports = str(sh.networksetup("-listallhardwareports"))
-    
-    # Common network interfaces to configure
-    interfaces = ["Wi-Fi", "Ethernet"]
-    
-    for interface in interfaces:
-        if f"Hardware Port: {interface}" not in hardware_ports:
-            continue
-            
-        try:
-            # Get current DNS servers
-            current_dns = str(sh.networksetup("-getdnsservers", interface))
-            
-            # Check if Tailscale DNS is already configured
-            if TAILSCALE_DNS in current_dns:
-                log_info(f"Tailscale DNS already configured for {interface}.")
-                continue
-            
-            if dry_run:
-                log_action(f"[DRY RUN] Would configure Tailscale DNS for {interface}")
-                continue
-            
-            # Get current DNS servers again for the actual configuration
-            current_dns_list = []
-            try:
-                dns_output = str(sh.networksetup("-getdnsservers", interface))
-                if "There aren't any" not in dns_output and dns_output.strip():
-                    current_dns_list = dns_output.strip().split('\n')
-            except Exception:
-                pass
-            
-            # Prepend Tailscale DNS to existing DNS servers
-            new_dns_list = [TAILSCALE_DNS] + current_dns_list
-            
-            log_action(f"Adding Tailscale DNS to {interface}...")
-            sh.sudo.networksetup("-setdnsservers", interface, *new_dns_list)
-            
-        except Exception as e:
-            # Interface might not exist or be configured
-            continue
-
-
-def setup_tmux_service(dry_run: bool = False) -> None:
-    """Setup tmux service as LaunchAgent."""
-    if dry_run:
-        log_action("[DRY RUN] Would setup tmux service")
-        return
-    
-    # Get real user info (handle sudo)
-    real_user = get_real_user()
-    real_home = get_real_home()
-    
-    if not real_user or real_user == "root":
-        log_info("Skipping tmux service for root user.")
-        return
-    
-    log_info(f"Setting up tmux service for user: {real_user}")
-    
-    # Create LaunchAgents directory if it doesn't exist
-    launch_agents_dir = Path(real_home) / "Library" / "LaunchAgents"
-    if not launch_agents_dir.exists():
-        log_action("Creating LaunchAgents directory...")
-        sh.sudo("-u", real_user, "mkdir", "-p", str(launch_agents_dir))
-    
-    # Get tmux binary path
+def run_text(args: Sequence[str], timeout: float = 3.0) -> str:
     try:
-        tmux_path = str(sh.which("tmux")).strip()
-    except Exception:
-        raise RuntimeError("tmux binary not found")
-    
-    log_info(f"Using tmux found at: {tmux_path}")
-    
-    # Create tmux service plist
-    plist_path = launch_agents_dir / "com.tmux.main.plist"
-    if not plist_path.exists():
-        log_action("Creating tmux service plist...")
-        
-        # Read template and replace placeholder
-        template_path = Path(__file__).parent / "configs" / "com.tmux.main.plist"
-        with open(template_path, 'r') as f:
-            plist_content = f.read()
-        
-        plist_content = plist_content.replace("TMUX_PATH_PLACEHOLDER", tmux_path)
-        
-        # Write plist file as the real user
-        with open(plist_path, 'w') as f:
-            f.write(plist_content)
-        
-        # Set proper ownership
-        sh.sudo("chown", f"{real_user}:staff", str(plist_path))
-    else:
-        log_info("tmux service plist already exists.")
-    
-    # Load the service if not already loaded
+        return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False).stdout.strip()
+    except Exception as exc:  # command missing, timeout, permission issue
+        return f"ERROR: {exc}"
+
+
+def command_exists(name: str) -> bool:
+    return subprocess.run(["/usr/bin/which", name], capture_output=True).returncode == 0
+
+
+def port_open(host: str, port: int, timeout: float = 0.4) -> bool:
     try:
-        launchctl_list = str(sh.launchctl("list"))
-        if "com.tmux.main" not in launchctl_list:
-            log_action("Loading tmux service...")
-            sh.sudo("-u", real_user, "launchctl", "load", str(plist_path))
-            log_info("tmux service loaded successfully.")
-        else:
-            log_info("tmux service is already loaded.")
-    except Exception as e:
-        log_action(f"Failed to load tmux service: {e}")
-
-
-def setup_colima_service(dry_run: bool = False) -> None:
-    """Setup Colima Docker service via Homebrew services."""
-    if dry_run:
-        log_action("[DRY RUN] Would setup Colima service")
-        return
-    
-    # Get real user info
-    real_user = get_real_user()
-    
-    if not real_user or real_user == "root":
-        log_info("Skipping Colima service for root user.")
-        return
-    
-    log_info("Setting up Colima service...")
-    
-    # Check if we're in tmux and need reattach-to-user-namespace
-    if os.environ.get('TMUX') and not command_exists('reattach-to-user-namespace'):
-        log_action("Installing reattach-to-user-namespace for tmux compatibility...")
-        sh.brew("install", "reattach-to-user-namespace")
-    
-    # Check if Colima service is already started
-    try:
-        services_list = str(sh.brew.services.list())
-        # Check if colima line contains "started"
-        for line in services_list.split('\n'):
-            if "colima" in line and "started" in line:
-                log_info("Colima service is already running.")
-                return
-    except Exception:
-        # brew services might not be available
-        pass
-    
-    # Start Colima service
-    log_action("Starting Colima service via Homebrew services...")
-    try:
-        sh.brew.services.start("colima")
-        log_info("Colima service started successfully.")
-        
-        # Wait a bit for Colima to initialize
-        import time
-        time.sleep(5)
-        
-        # Verify Colima is running
-        try:
-            sh.colima.status()
-            log_info("Colima is running.")
-        except Exception:
-            log_action("WARNING: Colima service started but Colima is not yet ready.")
-            log_action("It may take a moment to fully initialize.")
-    except Exception as e:
-        log_action(f"Failed to start Colima service: {e}")
-
-
-def manage_filevault(dry_run: bool = False) -> None:
-    """Ensure FileVault is enabled for disk encryption.
-
-    macOS Tahoe supports remote FileVault unlock via SSH over wired Ethernet,
-    so we keep FileVault on for security and rely on the pre-boot SSH daemon
-    for headless unlock.  See: man apple_ssh_and_filevault
-    """
-    try:
-        # Check FileVault status
-        status_output = str(sh.sudo.fdesetup("status"))
-
-        if "FileVault is On" in status_output:
-            log_info("FileVault is already enabled.")
-        else:
-            if dry_run:
-                log_action("[DRY RUN] Would enable FileVault")
-                return
-
-            log_action("FileVault is disabled. Enabling...")
-            sh.sudo.fdesetup("enable")
-    except Exception as e:
-        log_action(f"Failed to manage FileVault: {e}")
-
-
-def enable_ssh(dry_run: bool = False) -> None:
-    """Enable Remote Login (SSH) for pre-boot FileVault unlock.
-
-    macOS Tahoe runs a minimal SSH daemon before the data volume is unlocked,
-    accepting password auth over wired Ethernet.  After unlock, Tailscale SSH
-    takes over for day-to-day access.  See: man apple_ssh_and_filevault
-    """
-    try:
-        # Check SSH status
-        status_output = str(sh.sudo.systemsetup("-getremotelogin"))
-
-        if "Remote Login: On" in status_output:
-            log_info("Remote Login (SSH) is already enabled.")
-        else:
-            if dry_run:
-                log_action("[DRY RUN] Would enable Remote Login (SSH)")
-                return
-
-            log_action("Enabling Remote Login (SSH) for pre-boot FileVault unlock...")
-            sh.sudo.systemsetup("-setremotelogin", "on")
-    except Exception as e:
-        log_action(f"Failed to enable SSH: {e}")
-
-
-def configure_firewall(dry_run: bool = False) -> None:
-    """Configure macOS firewall with stealth mode and exceptions."""
-    SOCKET_FILTER = "/usr/libexec/ApplicationFirewall/socketfilterfw"
-    
-    try:
-        # Check firewall status
-        firewall_status = str(getattr(sh.sudo, SOCKET_FILTER)("--getglobalstate"))
-        
-        if "Firewall is disabled" in firewall_status or "disabled" in firewall_status:
-            if dry_run:
-                log_action("[DRY RUN] Would enable and configure firewall")
-                return
-            
-            log_action("Firewall is disabled. Enabling firewall...")
-            socketfilter = getattr(sh.sudo, SOCKET_FILTER)
-            socketfilter("--setglobalstate", "on")
-            socketfilter("--setallowsigned", "on")
-            socketfilter("--setstealthmode", "on")
-        else:
-            log_info("Firewall is already enabled.")
-        
-        if dry_run:
-            return
-        
-        # Configure firewall exceptions
-        log_info("Verifying firewall exceptions for continuity services...")
-        
-        # Get tailscaled path
-        tailscaled_path = get_tailscaled_path()
-        if not tailscaled_path:
-            log_action("WARNING: tailscaled path not found, skipping firewall exception")
-            tailscaled_path = None
-        
-        # Services to add exceptions for
-        services_to_check = [
-            tailscaled_path,
-            "/System/Library/CoreServices/RemoteManagement/ARDAgent.app",
-            "/System/Library/CoreServices/UniversalControl.app",
-            "/usr/libexec/sharingd",
-            "/usr/libexec/rapportd"
-        ]
-        
-        socketfilter = getattr(sh.sudo, SOCKET_FILTER)
-        
-        for service_path in services_to_check:
-            if not service_path:
-                continue
-                
-            try:
-                # Check if service is already in firewall list
-                list_output = str(socketfilter("--listapps"))
-                
-                if service_path not in list_output:
-                    log_action(f"Adding firewall exception for: {service_path}")
-                    socketfilter("--add", service_path)
-                
-                # Always ensure the app is unblocked
-                socketfilter("--unblockapp", service_path)
-            except Exception as e:
-                # Some services might not exist on all systems
-                continue
-        
-        log_info("Firewall exceptions are configured.")
-        
-    except Exception as e:
-        log_action(f"Failed to configure firewall: {e}")
-
-
-def enable_screen_sharing(dry_run: bool = False) -> None:
-    """Enable Screen Sharing (VNC) service for remote GUI access."""
-    try:
-        # Check if Screen Sharing service is already loaded
-        launchctl_list = str(sh.sudo.launchctl.list())
-        
-        if "com.apple.screensharing" in launchctl_list:
-            log_info("Screen Sharing service is already enabled.")
-            return
-        
-        if dry_run:
-            log_action("[DRY RUN] Would enable Screen Sharing service")
-            return
-        
-        log_action("Screen Sharing service is not loaded. Enabling...")
-        sh.sudo.launchctl.load("-w", "/System/Library/LaunchDaemons/com.apple.screensharing.plist")
-        
-    except Exception as e:
-        log_action(f"Failed to enable Screen Sharing: {e}")
-
-
-def configure_power_management(dry_run: bool = False) -> None:
-    """Configure power management settings to prevent sleep."""
-    try:
-        # Get current power management settings
-        pmset_output = str(sh.pmset("-g"))
-        
-        # Check if any changes are needed
-        changes_needed = []
-        
-        # Parse sleep setting
-        import re
-        sleep_match = re.search(r'^\s*sleep\s+(\d+)', pmset_output, re.MULTILINE)
-        if sleep_match and sleep_match.group(1) != "0":
-            changes_needed.append(("sleep", "Disabling system sleep..."))
-        
-        # Parse disksleep setting
-        disksleep_match = re.search(r'^\s*disksleep\s+(\d+)', pmset_output, re.MULTILINE)
-        if disksleep_match and disksleep_match.group(1) != "0":
-            changes_needed.append(("disksleep", "Disabling disk sleep..."))
-        
-        # Parse powernap setting
-        powernap_match = re.search(r'^\s*powernap\s+(\d+)', pmset_output, re.MULTILINE)
-        if powernap_match and powernap_match.group(1) != "0":
-            changes_needed.append(("powernap", "Disabling Power Nap..."))
-        
-        if not changes_needed:
-            log_info("Power settings are already configured to prevent sleep.")
-            return
-        
-        if dry_run:
-            if any(setting[0] == "sleep" for setting in changes_needed):
-                log_action("[DRY RUN] Would disable system sleep")
-            if any(setting[0] == "disksleep" for setting in changes_needed):
-                log_action("[DRY RUN] Would disable disk sleep")
-            if any(setting[0] == "powernap" for setting in changes_needed):
-                log_action("[DRY RUN] Would disable Power Nap")
-            return
-        
-        # Apply changes
-        for setting_name, log_message in changes_needed:
-            log_action(log_message)
-            sh.pmset("-a", setting_name, "0")
-        
-        log_info("Power settings configured to prevent sleep.")
-        
-    except Exception as e:
-        log_action(f"Failed to configure power management: {e}")
-
-
-def verify_docker_stack() -> None:
-    """Verify Docker stack is working correctly."""
-    log_info("Verifying Docker stack...")
-    
-    # Wait a moment for services to be ready
-    import time
-    time.sleep(2)
-    
-    # Check if DOCKER_HOST is configured
-    docker_host = os.environ.get('DOCKER_HOST')
-    if not docker_host:
-        log_action("DOCKER_HOST is not set. Please configure your shell as shown at the end of this script.")
-    else:
-        log_info(f"DOCKER_HOST is set to: {docker_host}")
-    
-    # Check if Colima is actually running
-    try:
-        sh.colima.status()
-        log_info("Colima runtime is running.")
-        
-        # Only test Docker if Colima is running
-        try:
-            sh.docker.ps()
-            log_info("Docker daemon is accessible.")
-        except Exception:
-            log_action("Docker daemon is not accessible. Check DOCKER_HOST and Colima status.")
-        
-        try:
-            sh.docker.compose.ls()
-            log_info("Docker Compose is working.")
-        except Exception:
-            log_action("Docker Compose is not working properly.")
-    except Exception:
-        log_action("Colima is not running. Docker commands will fail until Colima is started.")
-        log_action("The LaunchAgent may have failed to start Colima automatically.")
-        log_action("Try running 'colima start' manually to start the Docker runtime.")
-
-
-def verify_tailscale_connectivity() -> bool:
-    """Verify Tailscale connectivity. Returns True if connected."""
-    log_info("Verifying Tailscale connectivity...")
-    
-    try:
-        status_output = str(sh.tailscale.status())
-        
-        if "active" in status_output:
-            log_info("Tailscale is already active.")
+        with socket.create_connection((host, port), timeout=timeout):
             return True
-        else:
-            log_info("Tailscale is not connected. The final step is to connect to your Tailnet.")
-            log_info("Please run the following command and follow the authentication link:")
-            log_info("\n    sudo tailscale up\n")
-            return False
-    except Exception as e:
-        log_info(f"Failed to check Tailscale status: {e}")
+    except OSError:
         return False
+
+
+def tailscale_ip() -> str:
+    return run_text(["tailscale", "ip", "-4"]).splitlines()[0] if command_exists("tailscale") else ""
+
+
+def lan_ip() -> str:
+    return run_text(["ipconfig", "getifaddr", "en0"])
+
+
+def tailscale_ssh_enabled(status_json: str) -> bool:
+    try:
+        data = json.loads(status_json)
+    except json.JSONDecodeError:
+        return False
+    return bool(data.get("Self", {}).get("SSH_HostKeys"))
+
+
+def home_mode(path: Path) -> str:
+    try:
+        return oct(stat.S_IMODE(path.stat().st_mode))
+    except OSError:
+        return "missing"
+
+
+def status_checks(*, user: str = "adi") -> list[Check]:
+    checks: list[Check] = []
+
+    fv = run_text(["fdesetup", "status"])
+    checks.append(Check("FileVault", "ok" if "FileVault is On" in fv else "warn", fv))
+
+    fw = run_text([SOCKET_FILTER, "--getglobalstate"])
+    checks.append(Check("Firewall", "ok" if "enabled" in fw else "fail", fw))
+
+    stealth = run_text([SOCKET_FILTER, "--getstealthmode"])
+    stealth_on = "enabled" in stealth.lower() or " is on" in stealth.lower()
+    checks.append(Check("Firewall stealth", "ok" if stealth_on else "warn", stealth))
+
+    checks.append(Check("SSH port", "ok" if port_open("127.0.0.1", 22) else "fail", "127.0.0.1:22"))
+    checks.append(Check("mosh-server", "ok" if command_exists("mosh-server") else "fail", "required for mosh login"))
+
+    ts = run_text(["tailscale", "status", "--json"]) if command_exists("tailscale") else ""
+    checks.append(Check("Tailscale", "ok" if ts and not ts.startswith("ERROR") else "fail", "connected/status available"))
+    checks.append(Check("Tailscale SSH", "warn" if tailscale_ssh_enabled(ts) else "ok", "must stay off; use Tailscale network + mosh"))
+
+    mode = home_mode(Path(f"/Users/{user}"))
+    checks.append(Check(f"/Users/{user} mode", "ok" if mode == "0o700" else "warn", mode))
+
+    tail_ip = tailscale_ip()
+    hosts = [h for h in (lan_ip(), tail_ip) if h and not h.startswith("ERROR")]
+    for host in hosts:
+        for name, port in (
+            ("SMB", 445),
+            ("Screen Sharing", 5900),
+            ("ARD", 3283),
+            ("VibeTunnel", 4020),
+            ("LM Studio", 1234),
+        ):
+            checks.append(Check(f"{name} on {host}", "warn" if port_open(host, port) else "ok", f"port {port}"))
+
+    runners = run_text(["pgrep", "-fl", "Runner.Listener"])
+    checks.append(Check("GitHub runners", "warn" if runners else "ok", runners or "not running"))
+
+    return checks
+
+
+def print_checks(checks: Iterable[Check]) -> None:
+    for check in checks:
+        marker = {"ok": "OK", "warn": "WARN", "fail": "FAIL"}.get(check.state, check.state.upper())
+        detail = f" — {check.detail}" if check.detail else ""
+        print(f"[{marker}] {check.name}{detail}")

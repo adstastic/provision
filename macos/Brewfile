@@ -1,7 +1,9 @@
-# Development tools
-brew "go"
+# Secure remote access
+brew "tailscale"
+brew "mosh"
 brew "tmux"
 
-# Docker stack
+# Optional local containers. Installed, not auto-started unless `mm provision --with-containers`.
 brew "colima"
 brew "docker"
+brew "docker-compose"

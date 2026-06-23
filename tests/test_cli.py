@@ -1,80 +1,65 @@
-"""Tests for the CLI interface."""
-import pytest
-from typer.testing import CliRunner
-from unittest.mock import patch, MagicMock
-
-# Import will fail initially, that's expected in TDD
-from provision.cli import app
-
-runner = CliRunner()
+from provision import cli
 
 
-def test_cli_help():
-    """Test CLI help command."""
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    assert "provisioning tool" in result.stdout.lower()
-    # Look for options instead of command name
-    assert "--dry-run" in result.stdout.lower()
+def test_help_shows_core_commands_and_remote_safety(capsys):
+    try:
+        cli.main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    out = capsys.readouterr().out
+    assert "status" in out
+    assert "harden" in out
+    assert "screen" in out
+    assert "runners" in out
+    assert "Default is dry-run" in out
+    assert "Open two mosh sessions" in out
 
 
-@patch('provision.utils.is_root')
-@patch('provision.steps.provision_system')
-def test_setup_command_default(mock_provision, mock_is_root):
-    """Test setup command with default options."""
-    mock_is_root.return_value = True
-    
-    result = runner.invoke(app, [])
-    
-    assert result.exit_code == 0
-    mock_provision.assert_called_once_with(False, False)
-    assert "✅" in result.stdout
+def test_harden_help_shows_exact_scope_and_safety(capsys):
+    try:
+        cli.main(["harden", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    out = capsys.readouterr().out
+    assert "keeps SSH on" in out
+    assert "disables Tailscale SSH" in out
+    assert "post-harden gate" in out
+    assert "--keep-screen-sharing" in out
 
 
-@patch('provision.utils.is_root')
-def test_setup_requires_root_without_user_only(mock_is_root):
-    """Test setup command fails when not root and --user-only not specified."""
-    mock_is_root.return_value = False
-    
-    result = runner.invoke(app, [])
-    
-    assert result.exit_code == 1
-    assert "root" in result.stdout.lower()
+def test_harden_defaults_to_dry_run(monkeypatch, capsys):
+    calls = []
+
+    def fake_run_plan(plan, *, dry_run):
+        calls.append((dry_run, list(plan)))
+
+    monkeypatch.setattr(cli.macos, "run_plan", fake_run_plan)
+    cli.main(["harden"])
+
+    assert calls[0][0] is True
+    assert "dry run" in capsys.readouterr().out
 
 
-@patch('provision.utils.is_root')
-@patch('provision.steps.provision_system')
-def test_setup_user_only_no_root_required(mock_provision, mock_is_root):
-    """Test setup with --user-only doesn't require root."""
-    mock_is_root.return_value = False
-    
-    result = runner.invoke(app, ["--user-only"])
-    
-    assert result.exit_code == 0
-    mock_provision.assert_called_once_with(False, True)
+def test_apply_turns_off_dry_run_before_or_after_subcommand(monkeypatch):
+    calls = []
+
+    def fake_run_plan(plan, *, dry_run):
+        calls.append(dry_run)
+
+    monkeypatch.setattr(cli.macos, "run_plan", fake_run_plan)
+    cli.main(["--apply", "screen", "off"])
+    cli.main(["screen", "off", "--apply"])
+
+    assert calls == [False, False]
 
 
-@patch('provision.utils.is_root')
-@patch('provision.steps.provision_system')
-def test_setup_dry_run(mock_provision, mock_is_root):
-    """Test setup with --dry-run option."""
-    mock_is_root.return_value = True
-    
-    result = runner.invoke(app, ["--dry-run"])
-    
-    assert result.exit_code == 0
-    mock_provision.assert_called_once_with(True, False)
+def test_status_is_read_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.macos, "status_checks", lambda user: calls.append(user) or [])
+    monkeypatch.setattr(cli.macos, "print_checks", lambda checks: None)
 
+    cli.main(["--ssh-user", "adi", "status"])
 
-@patch('provision.utils.setup_logging')
-@patch('provision.utils.is_root')
-@patch('provision.steps.provision_system')
-def test_setup_verbose(mock_provision, mock_is_root, mock_logging):
-    """Test setup with --verbose option."""
-    mock_is_root.return_value = True
-    
-    result = runner.invoke(app, ["--verbose"])
-    
-    assert result.exit_code == 0
-    mock_logging.assert_called_once_with(True)
-    mock_provision.assert_called_once_with(False, False)
+    assert calls == ["adi"]
