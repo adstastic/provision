@@ -1,123 +1,65 @@
-"""Tests for the CLI interface."""
-from typer.testing import CliRunner
-from unittest.mock import patch
-
-from provision.cli import app, state
-
-runner = CliRunner()
+from provision import cli
 
 
-def test_help_shows_subcommands():
-    """mm --help lists provision and update subcommands."""
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    assert "provision" in result.stdout
-    assert "update" in result.stdout
+def test_help_shows_core_commands_and_remote_safety(capsys):
+    try:
+        cli.main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    out = capsys.readouterr().out
+    assert "status" in out
+    assert "harden" in out
+    assert "screen" in out
+    assert "runners" in out
+    assert "Default is dry-run" in out
+    assert "Open two mosh sessions" in out
 
 
-def test_provision_help_shows_user_only():
-    """mm provision --help shows --user-only option."""
-    result = runner.invoke(app, ["provision", "--help"])
-    assert result.exit_code == 0
-    assert "--user-only" in result.stdout
+def test_harden_help_shows_exact_scope_and_safety(capsys):
+    try:
+        cli.main(["harden", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    out = capsys.readouterr().out
+    assert "keeps SSH on" in out
+    assert "disables Tailscale SSH" in out
+    assert "post-harden gate" in out
+    assert "--keep-screen-sharing" in out
 
 
-def test_update_help_shows_tailscale():
-    """mm update --help shows tailscale subcommand."""
-    result = runner.invoke(app, ["update", "--help"])
-    assert result.exit_code == 0
-    assert "tailscale" in result.stdout
+def test_harden_defaults_to_dry_run(monkeypatch, capsys):
+    calls = []
+
+    def fake_run_plan(plan, *, dry_run):
+        calls.append((dry_run, list(plan)))
+
+    monkeypatch.setattr(cli.macos, "run_plan", fake_run_plan)
+    cli.main(["harden"])
+
+    assert calls[0][0] is True
+    assert "dry run" in capsys.readouterr().out
 
 
-@patch("provision.cli.subprocess.run")
-@patch("provision.steps.provision_system")
-def test_provision_default(mock_provision, mock_subprocess):
-    """mm provision caches sudo and runs full workflow."""
-    result = runner.invoke(app, ["provision"])
+def test_apply_turns_off_dry_run_before_or_after_subcommand(monkeypatch):
+    calls = []
 
-    assert result.exit_code == 0
-    mock_subprocess.assert_called_once_with(["sudo", "-v"], check=True)
-    mock_provision.assert_called_once_with(False, False)
-    assert "Provisioning complete!" in result.stdout
+    def fake_run_plan(plan, *, dry_run):
+        calls.append(dry_run)
 
+    monkeypatch.setattr(cli.macos, "run_plan", fake_run_plan)
+    cli.main(["--apply", "screen", "off"])
+    cli.main(["screen", "off", "--apply"])
 
-@patch("provision.steps.provision_system")
-def test_provision_user_only(mock_provision):
-    """mm provision --user-only skips sudo caching."""
-    result = runner.invoke(app, ["provision", "--user-only"])
-
-    assert result.exit_code == 0
-    mock_provision.assert_called_once_with(False, True)
+    assert calls == [False, False]
 
 
-@patch("provision.steps.provision_system")
-def test_provision_dry_run(mock_provision):
-    """mm --dry-run provision skips sudo and passes dry_run."""
-    result = runner.invoke(app, ["--dry-run", "provision"])
+def test_status_is_read_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.macos, "status_checks", lambda user: calls.append(user) or [])
+    monkeypatch.setattr(cli.macos, "print_checks", lambda checks: None)
 
-    assert result.exit_code == 0
-    mock_provision.assert_called_once_with(True, False)
+    cli.main(["--ssh-user", "adi", "status"])
 
-
-@patch("provision.cli.subprocess.run")
-@patch("provision.steps.provision_system")
-def test_provision_verbose(mock_provision, mock_subprocess):
-    """mm --verbose provision enables verbose logging."""
-    with patch("provision.utils.setup_logging") as mock_logging:
-        result = runner.invoke(app, ["--verbose", "provision"])
-
-    assert result.exit_code == 0
-    mock_logging.assert_called_once_with(True)
-    mock_provision.assert_called_once_with(False, False)
-
-
-@patch("provision.macos.install_tailscale")
-def test_update_tailscale(mock_install):
-    """mm update tailscale calls install_tailscale."""
-    result = runner.invoke(app, ["update", "tailscale"])
-
-    assert result.exit_code == 0
-    mock_install.assert_called_once_with(dry_run=False)
-
-
-@patch("provision.macos.install_tailscale")
-def test_update_tailscale_dry_run(mock_install):
-    """mm --dry-run update tailscale passes dry_run."""
-    result = runner.invoke(app, ["--dry-run", "update", "tailscale"])
-
-    assert result.exit_code == 0
-    mock_install.assert_called_once_with(dry_run=True)
-
-
-def test_help_shows_runner():
-    """mm --help lists runner subcommand."""
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    assert "runner" in result.stdout
-
-
-def test_runner_help_shows_install():
-    """mm runner --help shows install subcommand."""
-    result = runner.invoke(app, ["runner", "--help"])
-    assert result.exit_code == 0
-    assert "install" in result.stdout
-
-
-@patch("provision.cli.subprocess.run")
-@patch("provision.macos.install_runner_daemons")
-def test_runner_install(mock_install, mock_subprocess):
-    """mm runner install caches sudo and calls install_runner_daemons."""
-    result = runner.invoke(app, ["runner", "install"])
-
-    assert result.exit_code == 0
-    mock_subprocess.assert_called_once_with(["sudo", "-v"], check=True)
-    mock_install.assert_called_once_with(dry_run=False)
-
-
-@patch("provision.macos.install_runner_daemons")
-def test_runner_install_dry_run(mock_install):
-    """mm --dry-run runner install skips sudo and passes dry_run."""
-    result = runner.invoke(app, ["--dry-run", "runner", "install"])
-
-    assert result.exit_code == 0
-    mock_install.assert_called_once_with(dry_run=True)
+    assert calls == ["adi"]
